@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Testes — RpcKit</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">Rpc<span class="accent">Kit</span></div>
+    <div class="brand-tagline">SignalR + typed RPC + duplex CliSiTef</div>
+    <nav class="toc">
+      <h4>Começo</h4>
+      <ul>
+        <li><a href="index.html">Visão geral</a></li>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="architecture.html">Arquitetura</a></li>
+      </ul>
+      <h4>Conceitos</h4>
+      <ul>
+        <li><a href="addressing.html">Endereçamento</a></li>
+        <li><a href="duplex.html">Duplex e CliSiTef</a></li>
+        <li><a href="concurrency.html">Concorrência</a></li>
+        <li><a href="contracts.html">Novos contratos</a></li>
+        <li><a href="sourcegen.html">Source Generator</a></li>
+      </ul>
+      <h4>Operação</h4>
+      <ul>
+        <li><a href="testing.html">Testes</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main>
+    <span class="eyebrow">Operação</span>
+    <h1>Testes</h1>
+    <p class="lede">
+      Testar RPC com hardware real (pinpad, impressora) é caro e lento. O setup atual hospeda
+      o <code>Sample.Server.Api</code> via <code>WebApplicationFactory</code> e usa conexões
+      SignalR <em>in-memory</em> — caller e agente vivem no processo do teste, exatamente o mesmo
+      caminho de código de produção (menos o TCP).
+    </p>
+
+    <h2 id="rodar">Rodar</h2>
+    <pre><code>dotnet test tests/Rpc.IntegrationTests</code></pre>
+    <p>7 testes, ~40s. Cobertura por cenário:</p>
+    <table>
+      <thead><tr><th>Teste</th><th>O que verifica</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>Caller_invokes_server_side_handler_via_RpcAddress_Server</code></td>
+          <td>Caso 1: caller → handler local no servidor.</td>
+        </tr>
+        <tr>
+          <td><code>Caller_invokes_agent_via_RpcAddress_Device</code></td>
+          <td>Caso 2: caller → agente específico por DeviceId.</td>
+        </tr>
+        <tr>
+          <td><code>Caller_invokes_agent_via_RpcAddress_Role_for_capability</code></td>
+          <td>Caso 4: roteamento por capability+tenant para o primeiro agente disponível.</td>
+        </tr>
+        <tr>
+          <td><code>Caller_invokes_agent_via_RpcAddress_User_for_user_plus_capability</code></td>
+          <td>Caso 3 fluxo feliz: duplex completo, troca de mensagens, TefCompleted.</td>
+        </tr>
+        <tr>
+          <td><code>Tef_caller_cancellation_propagates_to_agent_loop</code></td>
+          <td>Caso 3 cancelamento: o token do agente é cancelado quando o caller cancela.</td>
+        </tr>
+        <tr>
+          <td><code>Invoke_to_offline_device_throws_RouteNotFound</code></td>
+          <td>Erro de roteamento quando o device alvo não está conectado.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="fixture">A fixture</h2>
+    <p>
+      <code>RpcTestFixture</code> herda <code>WebApplicationFactory&lt;Program&gt;</code> apontando
+      pro <code>Sample.Server.Api</code>. Habilita <code>EnableDetailedErrors</code> no SignalR
+      pra facilitar diagnóstico e expõe dois helpers:
+    </p>
+    <pre><code class="lang-cs">// abre HubConnection in-memory contra o test server
+await using var caller = await fixture.ConnectAsync(deviceId: "caller-1");
+
+// agora com capabilities e dispatchers (este Hub agora é também um agente)
+var agentDispatchers = new DispatcherRegistry();
+PosTerminalDispatcher.Register(agentDispatchers, new TestPosTerminal("agent-A"));
+
+await using var agent = await fixture.ConnectAsync(
+    deviceId: "agent-A",
+    capabilities: [Capability.PosTerminal],
+    agentDispatchers: agentDispatchers);</code></pre>
+
+    <p>
+      O <code>fixture.ClientFor(connection)</code> devolve um <code>IRpcClient</code> com todos
+      os proxies registrados, pronto pra invocar.
+    </p>
+
+    <h2 id="exemplo">Exemplo: teste do fluxo TEF completo</h2>
+    <pre><code class="lang-cs">[Fact]
+public async Task Caller_invokes_agent_via_RpcAddress_User_for_user_plus_capability()
+{
+    await using var fixture = new RpcTestFixture();
+
+    var tefDispatchers = new DispatcherRegistry();
+    TefServiceDispatcher.Register(tefDispatchers, new TestTefServiceImpl());
+
+    await using var agent = await fixture.ConnectAsync(
+        deviceId: "pdv-01",
+        userId: "operator-1",
+        capabilities: [Capability.Tef],
+        agentDispatchers: tefDispatchers);
+
+    await using var caller = await fixture.ConnectAsync(deviceId: "blazor-session-1");
+    var rpc = fixture.ClientFor(caller);
+    var tef = rpc.For&lt;ITefService&gt;(RpcAddress.User("operator-1", Capability.Tef));
+
+    await using var call = tef.Charge(new TefRequest(50m, "operator-1", "REF1"), default);
+
+    var seen = new List&lt;TefEvent&gt;();
+    var done = new TaskCompletionSource&lt;TefCompleted&gt;(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    _ = Task.Run(async () =&gt;
+    {
+        await foreach (var ev in call.Responses)
+        {
+            seen.Add(ev);
+            switch (ev)
+            {
+                case TefCollectInput: await call.SendAsync(new TefResponse("12345678901")); break;
+                case TefMenu:         await call.SendAsync(new TefResponse("1")); break;
+                case TefConfirm:      await call.SendAsync(new TefResponse("S")); break;
+                case TefCompleted ok: done.TrySetResult(ok); break;
+                case TefError err:    done.TrySetException(new InvalidOperationException(err.Message)); break;
+            }
+        }
+    });
+
+    var completed = await done.Task;
+    Assert.Equal("123456", completed.Nsu);
+    Assert.Contains(seen, e =&gt; e is TefDisplayMessage);
+}</code></pre>
+
+    <h2 id="cancel">Testando cancelamento</h2>
+    <p>O teste de cancelamento expõe o token do agente através de um callback no impl de teste:</p>
+    <pre><code class="lang-cs">var agentCancelled = new TaskCompletionSource&lt;bool&gt;(TaskCreationOptions.RunContinuationsAsynchronously);
+var impl = new TestTefServiceImpl
+{
+    OnStart = call =&gt; call.Token.Register(() =&gt; agentCancelled.TrySetResult(true))
+};
+// ... agente registrado com esse impl ...
+
+using var cts = new CancellationTokenSource();
+await using var call = tef.Charge(new TefRequest(10m, "u2", "X"), cts.Token);
+
+// consome ao menos uma mensagem para garantir que o duplex está estabelecido
+var enumerator = call.Responses.GetAsyncEnumerator(cts.Token);
+await enumerator.MoveNextAsync();
+await enumerator.DisposeAsync();
+
+cts.Cancel();   // dispara a cadeia: caller → DuplexCancel → agente
+
+var won = await Task.WhenAny(agentCancelled.Task, Task.Delay(TimeSpan.FromSeconds(10)));
+Assert.Same(agentCancelled.Task, won);   // não foi timeout</code></pre>
+    <p>Esse teste prova a invariante mais importante do duplex: <strong>cancelamento atravessa fronteiras de processo</strong>.</p>
+
+    <h2 id="dicas">Dicas pra escrever seus próprios testes</h2>
+    <ul>
+      <li><strong>Evite portas TCP.</strong> Use <code>fixture.Server.CreateHandler()</code> via a fixture; isso garante reprodutibilidade e velocidade.</li>
+      <li><strong>Use timeouts gordos.</strong> SignalR + JSON + Channels podem somar 100-300ms só no setup; ajuste o timeout do teste pra 10-15s.</li>
+      <li><strong>Sempre <code>await using</code></strong> nas conexões e nos duplex calls — vazamento de Hub connections aborta testes futuros.</li>
+      <li><strong>Implementações de teste em <code>tests/.../Agents/</code></strong> — replicam só o que importa pro caso. Não use as impls reais a menos que valha a pena.</li>
+      <li><strong>Pra simular falha de agente</strong>: descarte o <code>HubConnection</code> do agente no meio do teste e verifique que o caller recebe <code>OperationCanceledException</code> ou erro com <code>Kind = "RemoteException"</code>.</li>
+    </ul>
+
+    <h2 id="o-que-falta">O que ainda não está testado</h2>
+    <ul>
+      <li>Reconexão automática durante chamada em voo (call/return deveria ser reenviado, duplex deveria falhar rápido).</li>
+      <li>Throughput: latência p99 sob carga concorrente (use <code>BenchmarkDotNet</code> em um projeto separado).</li>
+      <li>Recusa de confirmação pós-impressão (TEF <code>desfaz</code>).</li>
+      <li>Erro do pinpad real (<code>rc != 0</code> não-cancelado).</li>
+    </ul>
+    <p>Esses são candidatos diretos pra próxima rodada de testes.</p>
+
+    <footer class="page-foot">
+      <a href="sourcegen.html">← Source Generator</a>
+      <a href="index.html">↑ Início</a>
+    </footer>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,51 @@
+@page "/ping"
+@using Rpc.Core
+@using Sample.Contracts
+@inject IRpcClient Rpc
+
+<PageTitle>Peer ping</PageTitle>
+
+<h1>Peer-to-peer ping</h1>
+
+<p>Caso 2 do plano: chamada de um cliente para outro cliente, com o servidor como relay.</p>
+
+<EditForm Model="this" OnValidSubmit="PingAsync" FormName="ping">
+    <div class="mb-2">
+        <label>DeviceId alvo</label>
+        <InputText class="form-control" @bind-Value="DeviceId" />
+    </div>
+    <button class="btn btn-primary">Pingar</button>
+</EditForm>
+
+@if (_result is not null)
+{
+    <div class="alert alert-success mt-2">
+        <div>Device: <strong>@_result.DeviceId</strong></div>
+        <div>UTC: @_result.Timestamp</div>
+        <div>Status: @_result.Status</div>
+    </div>
+}
+@if (_error is not null)
+{
+    <div class="alert alert-danger mt-2">Erro: @_error</div>
+}
+
+@code {
+    private string DeviceId { get; set; } = Environment.MachineName + ":agent";
+    private PingResult? _result;
+    private string? _error;
+
+    private async Task PingAsync()
+    {
+        try
+        {
+            _error = null;
+            var pos = Rpc.For<IPosTerminal>(RpcAddress.Device(DeviceId));
+            _result = await pos.PingAsync(default);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+}

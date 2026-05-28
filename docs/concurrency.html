@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Concorrência — RpcKit</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">Rpc<span class="accent">Kit</span></div>
+    <div class="brand-tagline">SignalR + typed RPC + duplex CliSiTef</div>
+    <nav class="toc">
+      <h4>Começo</h4>
+      <ul>
+        <li><a href="index.html">Visão geral</a></li>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="architecture.html">Arquitetura</a></li>
+      </ul>
+      <h4>Conceitos</h4>
+      <ul>
+        <li><a href="addressing.html">Endereçamento</a></li>
+        <li><a href="duplex.html">Duplex e CliSiTef</a></li>
+        <li><a href="concurrency.html">Concorrência</a></li>
+        <li><a href="contracts.html">Novos contratos</a></li>
+        <li><a href="sourcegen.html">Source Generator</a></li>
+      </ul>
+      <h4>Operação</h4>
+      <ul>
+        <li><a href="testing.html">Testes</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main>
+    <span class="eyebrow">Conceitos</span>
+    <h1>Concorrência</h1>
+    <p class="lede">
+      RpcKit é correios — entrega o pacote. Quem decide o que fazer com ele é o destinatário.
+      Esta página define onde cada controle de concorrência mora: roteamento, handler,
+      caller, e o gateway de aplicação que esconde tudo isso da UI.
+    </p>
+
+    <h2 id="responsabilidades">Quem é responsável pelo quê</h2>
+    <table>
+      <thead>
+        <tr><th>Responsabilidade</th><th>RpcKit</th><th>Handler</th><th>Caller</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Entregar a chamada uma vez ao alvo certo</td><td>✅</td><td></td><td></td></tr>
+        <tr><td>Propagar cancelamento bilateralmente</td><td>✅</td><td></td><td></td></tr>
+        <tr><td>Timeout do transporte (default 5min)</td><td>✅</td><td></td><td></td></tr>
+        <tr><td>Reconexão automática do canal</td><td>✅</td><td></td><td></td></tr>
+        <tr><td>Roteamento por <code>RpcAddress</code></td><td>✅</td><td></td><td></td></tr>
+        <tr><td>Rejeitar 2ª chamada concorrente para método <code>Exclusive</code></td><td>✅ (opt-in)</td><td></td><td></td></tr>
+        <tr><td>Saber se o pinpad / COM port está livre</td><td></td><td>✅</td><td></td></tr>
+        <tr><td>Política "esperar vs rejeitar" quando recurso ocupado</td><td></td><td>✅</td><td></td></tr>
+        <tr><td>Enfileirar jobs de impressão</td><td></td><td>✅</td><td></td></tr>
+        <tr><td>Desabilitar botão enquanto fluxo TEF está rodando</td><td></td><td></td><td>✅</td></tr>
+        <tr><td>Decidir o que fazer após receber <code>Busy</code></td><td></td><td></td><td>✅</td></tr>
+        <tr><td>Idempotência (chamar duas vezes = um efeito)</td><td></td><td>✅</td><td>✅</td></tr>
+        <tr><td>Saga / orquestração multi-step</td><td></td><td></td><td>✅</td></tr>
+        <tr><td>Coordenação cross-processo no mesmo host</td><td></td><td>✅ (driver / OS lock)</td><td></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="exclusive">Flag <code>Exclusive = true</code> nos contratos</h2>
+    <p>
+      Quando o recurso fisicamente só permite uma operação por vez — pinpad, gaveta de dinheiro,
+      leitor biométrico — marque o método como <code>Exclusive</code>. O router rejeita a 2ª
+      chamada com <code>RpcException(Kind = "Busy")</code> <strong>antes de chegar no agente</strong>,
+      economizando uma viagem de rede e dando feedback imediato ao caller.
+    </p>
+
+    <pre><code class="lang-cs">[RpcContract]
+public interface ITefService
+{
+    [RpcMethod(1, Exclusive = true)]
+    IDuplexCall&lt;TefResponse, TefEvent&gt; Charge(TefRequest initial, CancellationToken ct);
+}</code></pre>
+
+    <p>O lock é por tupla <code>(ConnectionId, ContractId, MethodId)</code>. Implicações:</p>
+    <ul>
+      <li>Dois agentes diferentes podem executar <code>Charge</code> ao mesmo tempo — são pinpads distintos.</li>
+      <li>O mesmo agente não pode receber duas <code>Charge</code> simultâneas — é o mesmo pinpad.</li>
+      <li>Quando o agente desconecta, todos os locks daquele ConnectionId são liberados (<code>ExclusiveCallRegistry.ReleaseAllForConnection</code>).</li>
+      <li>Ao dispor o duplex em voo, o lock libera automaticamente.</li>
+    </ul>
+
+    <div class="callout warn">
+      <strong>Não marque <code>Exclusive</code> em métodos que aceitam concorrência</strong>
+      (impressão, consultas, atualizações de estoque). Forçar serialização global onde não precisa
+      mata throughput sem ganhar nada.
+    </div>
+
+    <h2 id="defesa-profundidade">Defesa em profundidade no handler</h2>
+    <p>
+      Mesmo com <code>Exclusive = true</code>, vale ter um <code>SemaphoreSlim</code> dentro do
+      impl. Razões:
+    </p>
+    <ul>
+      <li>Outro processo no mesmo host pode abrir o driver USB direto (ex: app MAUI nativo) — o router não vê.</li>
+      <li>Reinicialização do servidor zera os locks; uma chamada antiga ainda em voo no agente continuaria.</li>
+      <li>Documenta a intenção no código do handler.</li>
+    </ul>
+
+    <pre><code class="lang-cs">public sealed class TefServiceImpl : ITefService
+{
+    private readonly SemaphoreSlim _pinpadLock = new(initialCount: 1, maxCount: 1);
+
+    public IDuplexCall&lt;TefResponse, TefEvent&gt; Charge(TefRequest initial, CancellationToken ct)
+    {
+        if (!_pinpadLock.Wait(0))
+            throw new RpcBusyException("Outra transação TEF está em andamento neste pinpad.");
+
+        var call = new DuplexCallChannel&lt;TefResponse, TefEvent&gt;(ct);
+        _ = Task.Run(async () =&gt;
+        {
+            try { await RunCliSiTefLoopAsync(initial, call); }
+            finally { _pinpadLock.Release(); }
+        }, call.Token);
+        return call;
+    }
+}</code></pre>
+
+    <h2 id="queue">Fila de impressão com <code>Channel&lt;T&gt;</code></h2>
+    <p>
+      Impressão é por natureza sequencial num driver físico, mas <strong>não exclusiva</strong> —
+      callers concorrentes não precisam ser rejeitados, devem entrar na fila. O agente mantém
+      um <code>Channel&lt;T&gt;</code> com backpressure (rejeita se a fila encher) e um worker
+      que processa em FIFO.
+    </p>
+
+    <pre><code class="lang-cs">public sealed class PrinterServiceImpl : IPrinterService, IHostedService
+{
+    private readonly Channel&lt;QueuedJob&gt; _queue = Channel.CreateBounded&lt;QueuedJob&gt;(
+        new BoundedChannelOptions(capacity: 32) { FullMode = BoundedChannelFullMode.Wait });
+
+    public Task StartAsync(CancellationToken _) { Task.Run(ProcessQueueAsync); return Task.CompletedTask; }
+
+    public async Task&lt;PrintResult&gt; PrintAsync(PrintJob job, CancellationToken ct)
+    {
+        var tcs = new TaskCompletionSource&lt;PrintResult&gt;(TaskCreationOptions.RunContinuationsAsynchronously);
+        await _queue.Writer.WriteAsync(new(job, tcs, ct), ct);
+        return await tcs.Task;     // caller espera o SEU job sair, não bloqueia outros
+    }
+
+    private async Task ProcessQueueAsync()
+    {
+        await foreach (var (job, tcs, ct) in _queue.Reader.ReadAllAsync())
+        {
+            try { tcs.TrySetResult(await DoPrintAsync(job, ct)); }
+            catch (Exception ex) { tcs.TrySetException(ex); }
+        }
+    }
+}</code></pre>
+
+    <p>Características desta abordagem:</p>
+    <ul>
+      <li><strong>Backpressure por canal bounded</strong> — quando a fila enche (32 jobs), o 33° caller espera o canal abrir. Evita memória crescer descontroladamente.</li>
+      <li><strong>Caller espera seu próprio job</strong> — recebe <code>PrintResult</code> quando a impressora terminou, não quando entrou na fila.</li>
+      <li><strong>Cancelamento individual</strong> — se o caller cancela enquanto o job está enfileirado, descarta sem imprimir.</li>
+      <li><strong>FIFO global</strong> — não há prioridade. Se precisar, adicione uma fila por capability.</li>
+    </ul>
+
+    <h2 id="fila-servidor">Por que não enfileirar no servidor?</h2>
+    <table>
+      <thead><tr><th>Critério</th><th>Fila no agente (atual)</th><th>Fila no servidor</th></tr></thead>
+      <tbody>
+        <tr><td>Onde vive o estado</td><td>Junto do driver</td><td>Distribuído entre processos</td></tr>
+        <tr><td>Backpressure</td><td><code>Channel&lt;T&gt;</code> bounded — simples</td><td>Redis / DB ou memória crescer</td></tr>
+        <tr><td>Persistência se agente cai</td><td>Jobs em voo perdidos; caller pega <code>OperationCanceled</code></td><td>Jobs persistidos (vantagem real)</td></tr>
+        <tr><td>Visibilidade pra admin</td><td>Local ao agente</td><td>Centralizada (vantagem real)</td></tr>
+        <tr><td>Complexidade</td><td>~30 linhas</td><td>Tabela <code>PrintJobs</code>, retry policy, dashboard</td></tr>
+      </tbody>
+    </table>
+    <p>
+      Para loja pequena → agente. Quando virar "preciso saber quantos jobs estão pendentes em
+      todas as cozinhas do tenant", aí é projeto de print spooler dedicado, fora do RpcKit.
+    </p>
+
+    <h2 id="gateway">Gateway de aplicação esconde o transporte</h2>
+    <p>
+      A UI <strong>não deve depender</strong> de <code>ITefService</code> + <code>IRpcClient</code>.
+      Em MAUI rodando no mesmo host do pinpad, o RPC é desperdício — chama CliSiTef direto.
+      Em Blazor Server, precisa do RPC. O padrão certo é <em>ports &amp; adapters</em>:
+    </p>
+
+    <pre><code class="lang-cs">// no domínio:
+public interface ITefGateway
+{
+    IDuplexCall&lt;TefResponse, TefEvent&gt; Charge(TefRequest req, CancellationToken ct);
+}
+
+// em MAUI Windows / Self-Checkout:
+public sealed class DirectTefGateway(ICliSiTefBindings sitef) : ITefGateway
+{
+    public IDuplexCall&lt;TefResponse, TefEvent&gt; Charge(TefRequest req, CancellationToken ct) =&gt;
+        /* usa CliSiTef direto, sem RPC */;
+}
+
+// em Blazor Server / ASP.NET:
+public sealed class RemoteTefGateway(IRpcClient rpc, ICurrentUser user) : ITefGateway
+{
+    public IDuplexCall&lt;TefResponse, TefEvent&gt; Charge(TefRequest req, CancellationToken ct) =&gt;
+        rpc.For&lt;ITefService&gt;(RpcAddress.User(user.UserId, Capability.Tef)).Charge(req, ct);
+}</code></pre>
+
+    <p>DI escolhe a implementação por host:</p>
+    <pre><code class="lang-cs">// MAUI Hybrid Blazor:
+services.AddSingleton&lt;ITefGateway, DirectTefGateway&gt;();
+
+// API ASP.NET hospedando Blazor Server:
+services.AddScoped&lt;ITefGateway, RemoteTefGateway&gt;();</code></pre>
+
+    <p>A página Razor injeta <code>ITefGateway</code> e <strong>não sabe</strong> qual transporte está rodando atrás. Veja <a href="contracts.html">Novos contratos</a> para o passo-a-passo.</p>
+
+    <h2 id="caller-ux">UX do caller após <code>Busy</code></h2>
+    <p>O caller decide o que fazer. Padrões comuns:</p>
+    <ul>
+      <li><strong>TEF:</strong> mostrar mensagem "Outra transação em andamento. Aguarde." e desabilitar o botão. <strong>Não retry automático</strong> — pinpad tem timeout do adquirente, retry tarde fede.</li>
+      <li><strong>Comando de admin (cancelar última transação):</strong> retry com backoff curto (~500ms) algumas vezes; falha definitiva se persistir.</li>
+      <li><strong>Sync periódico:</strong> ignorar o erro; o próximo ciclo tenta de novo.</li>
+    </ul>
+
+    <h2 id="cobertura">O que o teste de integração cobre</h2>
+    <p>
+      <code>Exclusive_duplex_rejects_second_concurrent_call_with_Busy_without_hitting_agent</code>
+      verifica três invariantes:
+    </p>
+    <ol>
+      <li>1ª chamada abre o duplex no agente (impl invocada).</li>
+      <li>2ª chamada concorrente recebe <code>RpcBusyException</code> <strong>sem que o agente seja invocado uma segunda vez</strong>.</li>
+      <li>Após dispor a 1ª, o lock libera e a 3ª chamada vai adiante normalmente.</li>
+    </ol>
+
+    <h2 id="proximos">Próximos passos</h2>
+    <ul>
+      <li><a class="link-underline" href="contracts.html">Novos contratos</a> — adicionar <code>Exclusive</code> nos seus contratos.</li>
+      <li><a class="link-underline" href="duplex.html">Duplex e CliSiTef</a> — fluxo completo do loop interativo.</li>
+      <li><a class="link-underline" href="testing.html">Testes</a> — padrões pra testar concorrência.</li>
+    </ul>
+
+    <footer class="page-foot">
+      <a href="duplex.html">← Duplex e CliSiTef</a>
+      <a href="contracts.html">Novos contratos →</a>
+    </footer>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

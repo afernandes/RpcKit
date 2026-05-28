@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Arquitetura — RpcKit</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">Rpc<span class="accent">Kit</span></div>
+    <div class="brand-tagline">SignalR + typed RPC + duplex CliSiTef</div>
+    <nav class="toc">
+      <h4>Começo</h4>
+      <ul>
+        <li><a href="index.html">Visão geral</a></li>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="architecture.html">Arquitetura</a></li>
+      </ul>
+      <h4>Conceitos</h4>
+      <ul>
+        <li><a href="addressing.html">Endereçamento</a></li>
+        <li><a href="duplex.html">Duplex e CliSiTef</a></li>
+        <li><a href="concurrency.html">Concorrência</a></li>
+        <li><a href="contracts.html">Novos contratos</a></li>
+        <li><a href="sourcegen.html">Source Generator</a></li>
+      </ul>
+      <h4>Operação</h4>
+      <ul>
+        <li><a href="testing.html">Testes</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main>
+    <span class="eyebrow">Começo</span>
+    <h1>Arquitetura</h1>
+    <p class="lede">Camadas, componentes, fluxo de uma chamada simples e fluxo de uma sessão duplex roteada para um agente remoto.</p>
+
+    <h2 id="camadas">Camadas</h2>
+    <p>Quatro projetos no <code>src/</code>, com fronteira clara entre <em>transport-neutral</em> (em baixo) e <em>SignalR-specific</em> (em cima).</p>
+
+    <table>
+      <thead><tr><th>Projeto</th><th>Tipos principais</th><th>Dependências</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>Rpc.Contracts</code></td>
+          <td><code>[RpcContract]</code>, <code>[RpcMethod]</code>, <code>IDuplexCall&lt;TUp, TDown&gt;</code></td>
+          <td>nenhuma</td>
+        </tr>
+        <tr>
+          <td><code>Rpc.Core</code></td>
+          <td><code>RpcAddress</code>, <code>Capability</code>, <code>IRpcInvoker</code>, <code>IRpcClient</code>, <code>RpcClient</code>, <code>ProxyRegistry</code>, <code>DispatcherRegistry</code>, <code>DuplexCallChannel</code>, <code>DeferredDuplexCall</code>, <code>JsonDuplexAdapter</code>, <code>RpcException</code></td>
+          <td><code>Rpc.Contracts</code></td>
+        </tr>
+        <tr>
+          <td><code>Rpc.SignalR.Server</code></td>
+          <td><code>RpcHub</code>, <code>IRpcRouter</code> / <code>RpcRouter</code>, <code>DeviceRegistry</code>, <code>PendingDuplexRegistry</code>, <code>InProcessRpcInvoker</code>, extensões DI</td>
+          <td><code>Rpc.Core</code> + <code>Microsoft.AspNetCore.App</code></td>
+        </tr>
+        <tr>
+          <td><code>Rpc.SignalR.Client</code></td>
+          <td><code>SignalRRpcInvoker</code>, <code>RpcConnectionHost</code>, <code>RpcClientBuilder</code>, <code>RpcClientOptions</code>, handlers do agente</td>
+          <td><code>Rpc.Core</code> + <code>Microsoft.AspNetCore.SignalR.Client</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>
+      <strong>Por que essa fronteira importa:</strong> os contratos e a abstração de cliente
+      (<code>IRpcClient.For&lt;T&gt;</code>) não sabem nada sobre SignalR. Trocar o transporte
+      (LAN isolada via mDNS, named pipes, gRPC) muda só a camada de cima. Os proxies/dispatchers
+      e a UI Blazor não sofrem refactor.
+    </p>
+
+    <h2 id="componentes">Componentes do servidor</h2>
+    <ul>
+      <li><strong><code>RpcHub</code></strong> — único <em>SignalR Hub</em>. Métodos: <code>Invoke</code>, <code>OpenStream</code>, <code>OpenDuplex</code>, mais os retornos da correlation (<code>SubmitDuplexResponse</code>, <code>CompleteDuplexResponse</code>, <code>FailDuplexResponse</code>). Faz handshake no <code>OnConnectedAsync</code> e cleanup no <code>OnDisconnectedAsync</code>.</li>
+      <li><strong><code>IRpcRouter</code> / <code>RpcRouter</code></strong> — toda a lógica de roteamento mora aqui. O Hub é fino, delega ao router. Isso permite que o <code>InProcessRpcInvoker</code> (usado pelo Blazor Server local) também use o mesmo router sem precisar de loopback SignalR.</li>
+      <li><strong><code>DeviceRegistry</code></strong> — mapa em memória <code>DeviceId → (ConnectionId, TenantId, UserId, Capabilities[])</code>. Suporta resolução por device id, por capability+tenant, e por user+capability.</li>
+      <li><strong><code>PendingDuplexRegistry</code></strong> — sessões duplex em voo, indexadas por <code>correlationId</code> e por <code>ConnectionId</code> do agente (para cancelar tudo quando ele desconecta).</li>
+      <li><strong><code>DispatcherRegistry</code></strong> (do Core) — handlers locais do servidor (ex: <code>IOrderService</code> implementado no próprio API).</li>
+    </ul>
+
+    <h2 id="cliente">Componentes do cliente</h2>
+    <ul>
+      <li><strong><code>RpcConnectionHost</code></strong> — <em>IHostedService</em>. Constrói o <code>HubConnection</code> com <code>WithAutomaticReconnect</code>, monta a query string do handshake (deviceId, capabilities, tenantId, userId, opcionalmente JWT) e conecta.</li>
+      <li><strong><code>SignalRRpcInvoker</code></strong> — implementação de <code>IRpcInvoker</code>. Traduz <code>InvokeAsync</code> / <code>OpenStreamAsync</code> / <code>OpenDuplexAsync</code> em chamadas SignalR (<code>InvokeAsync</code>, <code>StreamAsync</code>, <code>StreamAsync</code> com <code>ChannelReader</code> upstream).</li>
+      <li><strong><code>AgentDuplexSessions</code></strong> — quando o cliente também é <em>agente</em>, registra os callbacks <code>HandleInvoke</code>, <code>ServeDuplex</code>, <code>DuplexUpstream</code>, <code>DuplexComplete</code>, <code>DuplexCancel</code>. Mantém o mapa de sessões correlacionadas localmente.</li>
+      <li><strong><code>RpcClientBuilder</code></strong> — fluent API pra registrar proxies e handlers durante <code>AddRpcClient(...)</code>.</li>
+    </ul>
+
+    <h2 id="invoke-flow">Fluxo de uma chamada simples (<code>Invoke</code>)</h2>
+    <div class="diagram">
+      <svg viewBox="0 0 720 360" role="img" aria-label="Sequência de uma chamada Invoke peer-to-peer">
+        <defs>
+          <style>
+            .actor { fill: #111a2e; stroke: #2c3d5e; stroke-width: 1.5; rx: 6; }
+            .actor-label { fill: #e2e8f0; font: 600 13px var(--font-mono, monospace); }
+            .lifeline { stroke: #1f2c44; stroke-width: 1; stroke-dasharray: 4 4; }
+            .msg { stroke: #38bdf8; stroke-width: 1.5; fill: none; marker-end: url(#a); }
+            .msg-back { stroke: #86efac; stroke-width: 1.5; fill: none; marker-end: url(#b); }
+            .msg-label { fill: #cbd5e1; font: 12px var(--font-mono, monospace); }
+          </style>
+          <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="#38bdf8" />
+          </marker>
+          <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="#86efac" />
+          </marker>
+        </defs>
+
+        <rect class="actor" x="20" y="20" width="140" height="36" />
+        <text class="actor-label" x="90" y="44" text-anchor="middle">Caller</text>
+        <line class="lifeline" x1="90" y1="56" x2="90" y2="350" />
+
+        <rect class="actor" x="290" y="20" width="140" height="36" />
+        <text class="actor-label" x="360" y="44" text-anchor="middle">RpcHub</text>
+        <line class="lifeline" x1="360" y1="56" x2="360" y2="350" />
+
+        <rect class="actor" x="560" y="20" width="140" height="36" />
+        <text class="actor-label" x="630" y="44" text-anchor="middle">Agent</text>
+        <line class="lifeline" x1="630" y1="56" x2="630" y2="350" />
+
+        <path class="msg" d="M90 100 L358 100" />
+        <text class="msg-label" x="224" y="92" text-anchor="middle">Invoke(envelope)</text>
+
+        <text class="msg-label" x="360" y="146" text-anchor="middle">Router.InvokeAsync</text>
+        <text class="msg-label" x="360" y="164" text-anchor="middle">→ resolve DeviceRegistry</text>
+
+        <path class="msg" d="M360 200 L628 200" />
+        <text class="msg-label" x="494" y="192" text-anchor="middle">HandleInvoke(envelope)</text>
+
+        <text class="msg-label" x="630" y="246" text-anchor="middle">dispatcher.Invoke</text>
+        <text class="msg-label" x="630" y="264" text-anchor="middle">→ impl + serialize</text>
+
+        <path class="msg-back" d="M628 300 L362 300" />
+        <text class="msg-label" x="494" y="292" text-anchor="middle">InvokeResponse</text>
+
+        <path class="msg-back" d="M358 336 L92 336" />
+        <text class="msg-label" x="224" y="328" text-anchor="middle">InvokeResponse</text>
+      </svg>
+      <div class="caption">
+        O <code>InvokeAsync&lt;T&gt;</code> servidor→cliente (azul) é primitiva do SignalR
+        moderno (>= .NET 7), o que permite request/response síncrono em direção contrária ao
+        normal. Sem essa primitiva, precisaríamos do mesmo padrão de correlation que usamos pro duplex.
+      </div>
+    </div>
+
+    <h2 id="duplex-flow">Fluxo de um duplex remoto</h2>
+    <p>
+      O caso difícil. SignalR <strong>não</strong> tem primitiva nativa para o servidor invocar um
+      método <em>streaming</em> num cliente específico. Quando o caller pede um duplex e o alvo é
+      um agente remoto, o router usa <strong>correlation IDs</strong> e quatro mensagens auxiliares
+      (<code>ServeDuplex</code>, <code>DuplexUpstream</code>, <code>DuplexComplete</code>,
+      <code>DuplexCancel</code>) para amarrar dois streams half-duplex em um duplex lógico.
+    </p>
+
+    <div class="diagram">
+      <svg viewBox="0 0 760 540" role="img" aria-label="Sequência do duplex roteado por correlation">
+        <defs>
+          <style>
+            .actor { fill: #111a2e; stroke: #2c3d5e; stroke-width: 1.5; rx: 6; }
+            .actor-label { fill: #e2e8f0; font: 600 13px var(--font-mono, monospace); }
+            .lifeline { stroke: #1f2c44; stroke-width: 1; stroke-dasharray: 4 4; }
+            .msg { stroke: #38bdf8; stroke-width: 1.5; fill: none; marker-end: url(#a2); }
+            .msg-back { stroke: #86efac; stroke-width: 1.5; fill: none; marker-end: url(#b2); }
+            .msg-aux { stroke: #fbbf24; stroke-width: 1.5; fill: none; marker-end: url(#c2); }
+            .msg-label { fill: #cbd5e1; font: 12px var(--font-mono, monospace); }
+            .phase { fill: #64748b; font: 11px var(--font-mono, monospace); text-anchor: middle; }
+          </style>
+          <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#38bdf8" /></marker>
+          <marker id="b2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#86efac" /></marker>
+          <marker id="c2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#fbbf24" /></marker>
+        </defs>
+
+        <rect class="actor" x="40" y="20" width="160" height="36" />
+        <text class="actor-label" x="120" y="44" text-anchor="middle">Caller (Blazor)</text>
+        <line class="lifeline" x1="120" y1="56" x2="120" y2="530" />
+
+        <rect class="actor" x="300" y="20" width="160" height="36" />
+        <text class="actor-label" x="380" y="44" text-anchor="middle">RpcHub + Router</text>
+        <line class="lifeline" x1="380" y1="56" x2="380" y2="530" />
+
+        <rect class="actor" x="560" y="20" width="160" height="36" />
+        <text class="actor-label" x="640" y="44" text-anchor="middle">Agent (TEF)</text>
+        <line class="lifeline" x1="640" y1="56" x2="640" y2="530" />
+
+        <text class="phase" x="380" y="85">1. abertura</text>
+        <path class="msg" d="M120 110 L378 110" />
+        <text class="msg-label" x="249" y="102" text-anchor="middle">OpenDuplex(env) + upstream</text>
+
+        <path class="msg-aux" d="M378 144 L638 144" />
+        <text class="msg-label" x="508" y="136" text-anchor="middle">ServeDuplex(corr, contract, methodId, initialJson)</text>
+
+        <text class="phase" x="380" y="190">2. troca de mensagens</text>
+
+        <path class="msg-back" d="M638 220 L382 220" />
+        <text class="msg-label" x="510" y="212" text-anchor="middle">SubmitDuplexResponse(corr, "TefDisplay...")</text>
+
+        <path class="msg-back" d="M378 248 L122 248" />
+        <text class="msg-label" x="250" y="240" text-anchor="middle">yield TefDisplay (no IAsyncEnumerable)</text>
+
+        <path class="msg" d="M120 280 L378 280" />
+        <text class="msg-label" x="249" y="272" text-anchor="middle">upstream.Write("TefResponse...")</text>
+
+        <path class="msg-aux" d="M378 308 L638 308" />
+        <text class="msg-label" x="508" y="300" text-anchor="middle">DuplexUpstream(corr, "TefResponse...")</text>
+
+        <text class="phase" x="380" y="350">… repete por iteração CliSiTef …</text>
+
+        <text class="phase" x="380" y="395">3. finalização</text>
+
+        <path class="msg-back" d="M638 425 L382 425" />
+        <text class="msg-label" x="510" y="417" text-anchor="middle">SubmitDuplexResponse(corr, "TefCompleted")</text>
+
+        <path class="msg-back" d="M638 458 L382 458" />
+        <text class="msg-label" x="510" y="450" text-anchor="middle">CompleteDuplexResponse(corr)</text>
+
+        <path class="msg-back" d="M378 490 L122 490" />
+        <text class="msg-label" x="250" y="482" text-anchor="middle">IAsyncEnumerable completes</text>
+
+        <path class="msg" d="M120 520 L378 520" />
+        <text class="msg-label" x="249" y="512" text-anchor="middle">DisposeAsync()</text>
+      </svg>
+      <div class="caption">
+        Azul: caller → Hub. Verde: Hub → caller (server-streaming nativo). Amarelo: Hub → agente (SendAsync com correlation, fora do protocolo de streaming).
+      </div>
+    </div>
+
+    <p>O protocolo em prosa:</p>
+    <ol>
+      <li>Caller abre um stream duplex SignalR pro Hub passando <code>InvokeEnvelope</code> + sua ponta de <code>upstream</code> (TUp como JSON).</li>
+      <li>Router resolve o ConnectionId do agente alvo, gera um <code>correlationId</code>, registra uma <code>PendingDuplexSession</code> e envia <code>ServeDuplex</code> para o agente.</li>
+      <li>Agente recebe <code>ServeDuplex</code>, acha o dispatcher local, cria canais internos e roda o dispatcher.</li>
+      <li>Cada vez que a impl do agente emite um <code>TefEvent</code>, o agente chama <code>connection.InvokeAsync("SubmitDuplexResponse", corr, json)</code>. O Hub repassa via <code>session.Downstream.Writer</code>, que é o stream <code>IAsyncEnumerable&lt;string&gt;</code> sendo enumerado pelo caller.</li>
+      <li>Cada vez que o caller faz <code>call.SendAsync(TefResponse)</code>, isso entra no <code>upstream</code> do stream. O Router lê e repassa via <code>SendAsync("DuplexUpstream", corr, json)</code>.</li>
+      <li>Quando a impl termina (sucesso ou erro), o agente envia <code>CompleteDuplexResponse</code> (ou <code>FailDuplexResponse</code>), o Hub fecha o downstream e o caller sai do <code>await foreach</code>.</li>
+      <li>Se o caller cancela ou disposa, o Router envia <code>DuplexCancel</code> ao agente, que pára o dispatcher via <code>CancellationTokenSource.Cancel()</code> — o loop CliSiTef interrompe na próxima leitura de <code>upstream</code>.</li>
+      <li>Se o agente desconecta, <code>OnDisconnectedAsync</code> cancela todas as sessões com aquele ConnectionId. O caller recebe <code>OperationCanceledException</code> imediatamente.</li>
+    </ol>
+
+    <h2 id="inprocess">Blazor Server: caminho in-process</h2>
+    <p>
+      O <code>Sample.Server.Api</code> também usa <code>IRpcClient</code> para invocar handlers
+      (servidor ou remotos). Mas o Blazor Server roda <em>no servidor</em> — abrir um
+      <code>HubConnection</code> para o próprio <code>/rpc</code> seria um loopback caro.
+    </p>
+    <p>
+      Solução: <code>InProcessRpcInvoker</code>. Implementa <code>IRpcInvoker</code> em cima
+      diretamente do <code>IRpcRouter</code>, pulando o stack SignalR para chamadas locais e
+      mesmo para chamadas remotas (o router já faz a parte do <code>Clients.Client(...)</code>).
+      Registrado automaticamente por <code>AddRpcServer()</code>.
+    </p>
+
+    <pre><code class="lang-cs">// no Program.cs do Sample.Server.Api
+builder.Services.AddRpcServer();           // registra IRpcInvoker = InProcessRpcInvoker
+
+// na página Blazor — mesma API que o MAUI usaria
+var orders = await Rpc.For&lt;IOrderService&gt;(RpcAddress.Server)
+                      .GetOpenOrdersAsync(ct);</code></pre>
+
+    <h2 id="proximos">Próximos passos</h2>
+    <ul>
+      <li><a class="link-underline" href="addressing.html">Endereçamento</a> — todas as variantes de <code>RpcAddress</code>.</li>
+      <li><a class="link-underline" href="duplex.html">Duplex e CliSiTef</a> — modelagem completa do loop interativo.</li>
+    </ul>
+
+    <footer class="page-foot">
+      <a href="quickstart.html">← Quickstart</a>
+      <a href="addressing.html">Endereçamento →</a>
+    </footer>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+@page "/"
+
+<PageTitle>RpcKit demo</PageTitle>
+
+<h1>RpcKit — demonstração</h1>
+
+<p>Os quatro cenários do plano:</p>
+
+<ul>
+    <li><a href="/orders">Caso 1 — chamada ao servidor</a> (<code>RpcAddress.Server</code>)</li>
+    <li><a href="/ping">Caso 2 — peer-to-peer</a> (<code>RpcAddress.Device</code>)</li>
+    <li><a href="/tef">Caso 3 — TEF via pinpad com loop CliSiTef</a> (<code>RpcAddress.User</code> + duplex)</li>
+    <li><a href="/print">Caso 4 — impressão por capability</a> (<code>RpcAddress.Role</code>)</li>
+</ul>
+
+<p>Para 2, 3 e 4 é preciso que o <code>Sample.LocalAgent</code> esteja rodando contra esta API.</p>

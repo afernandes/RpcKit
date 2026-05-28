@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>RpcKit.Contracts</PackageId>
+    <Description>Atributos e interfaces neutras de RpcKit ([RpcContract], [RpcMethod], IDuplexCall). Sem dependência de transporte.</Description>
+    <PackageTags>rpc;signalr;duplex;contracts</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,54 @@
+@page "/print"
+@using Rpc.Core
+@using Sample.Contracts
+@using Sample.Contracts.Gateways
+@inject IPrinterGateway Printer
+
+<PageTitle>Impressão</PageTitle>
+
+<h1>Impressão remota</h1>
+
+<p>Caso 4 do plano: roteamento por capability — qualquer agente declarado com
+<code>printer.kitchen</code> no tenant alvo recebe o job.</p>
+
+<EditForm Model="this" OnValidSubmit="PrintAsync" FormName="print-job">
+    <div class="mb-2"><label>Tenant</label><InputText class="form-control" @bind-Value="TenantId"/></div>
+    <div class="mb-2"><label>Título</label><InputText class="form-control" @bind-Value="Title"/></div>
+    <div class="mb-2"><label>Corpo</label><InputTextArea class="form-control" @bind-Value="Body" rows="5"/></div>
+    <button class="btn btn-primary">Imprimir</button>
+</EditForm>
+
+@if (_result is not null)
+{
+    <div class="alert alert-success mt-2">
+        Impresso em <strong>@_result.PrinterName</strong>.
+    </div>
+}
+@if (_error is not null)
+{
+    <div class="alert alert-danger mt-2">Erro: @_error</div>
+}
+
+@code {
+    private string TenantId { get; set; } = "default";
+    private string Title { get; set; } = "Comanda 102";
+    private string Body { get; set; } = "1x Pizza\n2x Suco";
+    private PrintResult? _result;
+    private string? _error;
+
+    private async Task PrintAsync()
+    {
+        try
+        {
+            _error = null;
+            // O gateway esconde se vamos via RPC (Blazor Server) ou via driver local (MAUI).
+            _result = await Printer.PrintAsync(
+                Capability.PrinterKitchen.Name, TenantId,
+                new PrintJob(Title, Body), default);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+}

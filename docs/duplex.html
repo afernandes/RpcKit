@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Duplex e CliSiTef — RpcKit</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">Rpc<span class="accent">Kit</span></div>
+    <div class="brand-tagline">SignalR + typed RPC + duplex CliSiTef</div>
+    <nav class="toc">
+      <h4>Começo</h4>
+      <ul>
+        <li><a href="index.html">Visão geral</a></li>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="architecture.html">Arquitetura</a></li>
+      </ul>
+      <h4>Conceitos</h4>
+      <ul>
+        <li><a href="addressing.html">Endereçamento</a></li>
+        <li><a href="duplex.html">Duplex e CliSiTef</a></li>
+        <li><a href="concurrency.html">Concorrência</a></li>
+        <li><a href="contracts.html">Novos contratos</a></li>
+        <li><a href="sourcegen.html">Source Generator</a></li>
+      </ul>
+      <h4>Operação</h4>
+      <ul>
+        <li><a href="testing.html">Testes</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main>
+    <span class="eyebrow">Conceitos</span>
+    <h1>Duplex e CliSiTef</h1>
+    <p class="lede">
+      O CliSiTef (lib TEF da Software Express) não é request/response — é um loop interativo que
+      emite comandos para a UI a cada iteração e espera resposta. Modelar isso como
+      <code>IDuplexCall&lt;TUp, TDown&gt;</code> elimina classes inteiras de bug.
+    </p>
+
+    <h2 id="por-que">Por que não request/response com um <code>transactionId</code></h2>
+    <p>
+      A tentação é fazer a UI iniciar uma transação, receber um <code>txId</code>, e depois
+      mandar/receber mensagens por chamadas separadas correlacionadas pelo id. Funciona — mas
+      tem problemas:
+    </p>
+    <ul>
+      <li><strong>Estado órfão:</strong> se a UI fechar abruptamente, o agente fica num loop esperando uma resposta que nunca vem; é preciso timeout + reaper.</li>
+      <li><strong>Cancelamento espalhado:</strong> precisa de uma chamada extra <em>Cancel(txId)</em> e do agente tratar isso defensivamente.</li>
+      <li><strong>Concorrência:</strong> dois callers podem invocar <em>SubmitResponse(txId)</em> ao mesmo tempo — a ordem das respostas vira problema seu.</li>
+      <li><strong>Reconexão:</strong> ao reconectar, é preciso re-vincular o caller à sessão pelo <code>txId</code>.</li>
+    </ul>
+    <p>
+      Com duplex, <strong>a sessão é o par de canais</strong>. Cancelar o
+      <code>CancellationToken</code> fecha os canais; o loop do agente para na próxima leitura;
+      o stream do SignalR fecha; a UI sai do <code>await foreach</code>. Tudo atômico.
+    </p>
+
+    <h2 id="contrato">O contrato</h2>
+    <pre><code class="lang-cs">[RpcContract]
+public interface ITefService
+{
+    [RpcMethod(Id = 1)]
+    IDuplexCall&lt;TefResponse, TefEvent&gt; Charge(TefRequest initial, CancellationToken ct);
+}
+
+public sealed record TefRequest(decimal Amount, string OperatorId, string MerchantReference);
+public sealed record TefResponse(string Text);
+
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "$type")]
+[JsonDerivedType(typeof(TefDisplayMessage), nameof(TefDisplayMessage))]
+[JsonDerivedType(typeof(TefCollectInput),  nameof(TefCollectInput))]
+[JsonDerivedType(typeof(TefMenu),          nameof(TefMenu))]
+[JsonDerivedType(typeof(TefConfirm),       nameof(TefConfirm))]
+[JsonDerivedType(typeof(TefCompleted),     nameof(TefCompleted))]
+[JsonDerivedType(typeof(TefError),         nameof(TefError))]
+public abstract record TefEvent;
+
+public sealed record TefDisplayMessage(string Text) : TefEvent;
+public sealed record TefCollectInput(string Prompt, int MinLength, int MaxLength) : TefEvent;
+public sealed record TefMenu(string Title, IReadOnlyList&lt;string&gt; Options) : TefEvent;
+public sealed record TefConfirm(string Prompt) : TefEvent;
+public sealed record TefCompleted(string Nsu, string AuthorizationCode, string Receipt) : TefEvent;
+public sealed record TefError(int Code, string Message) : TefEvent;</code></pre>
+
+    <div class="callout">
+      <strong>JsonPolymorphic é importante:</strong> sem o discriminator <code>$type</code>, o
+      System.Text.Json não consegue deserializar o evento certo no caller. O JsonDuplexAdapter
+      reaproveita o <code>RpcJson.Options</code> que já trata polimorfismo declarado dessa forma.
+    </div>
+
+    <h2 id="caller">No lado do caller (Blazor)</h2>
+    <pre><code class="lang-cs">await using var call = Rpc.For&lt;ITefService&gt;(
+        RpcAddress.User(currentUserId, Capability.Tef))
+    .Charge(new TefRequest(Amount, OperatorId, Reference), ct);
+
+await foreach (var ev in call.Responses.WithCancellation(ct))
+{
+    switch (ev)
+    {
+        case TefDisplayMessage m:
+            CurrentMessage = m.Text;
+            StateHasChanged();
+            break;
+
+        case TefCollectInput ask:
+            var answer = await PromptUserAsync(ask);
+            await call.SendAsync(new TefResponse(answer), ct);
+            break;
+
+        case TefMenu menu:
+            var pick = await ShowMenuAsync(menu.Options);
+            await call.SendAsync(new TefResponse(pick), ct);
+            break;
+
+        case TefConfirm c:
+            var ok = await ConfirmAsync(c.Prompt);
+            await call.SendAsync(new TefResponse(ok ? "S" : "N"), ct);
+            break;
+
+        case TefCompleted ok:
+            ShowReceipt(ok);
+            return ok;
+
+        case TefError err:
+            throw new TefException(err.Code, err.Message);
+    }
+}</code></pre>
+    <p>O <code>await using</code> garante <code>DisposeAsync</code> mesmo em exceção ou cancelamento — fechando o duplex e enviando <code>DuplexCancel</code> pro agente.</p>
+
+    <h2 id="agente">No lado do agente (impl que envolve o CliSiTef)</h2>
+    <pre><code class="lang-cs">public IDuplexCall&lt;TefResponse, TefEvent&gt; Charge(TefRequest req, CancellationToken ct)
+{
+    var call = new DuplexCallChannel&lt;TefResponse, TefEvent&gt;(ct);
+    _ = Task.Run(() =&gt; RunCliSiTefLoopAsync(req, call), call.Token);
+    return call;
+}
+
+private async Task RunCliSiTefLoopAsync(TefRequest req, DuplexCallChannel&lt;TefResponse, TefEvent&gt; call)
+{
+    var ct = call.Token;
+    try
+    {
+        int rc = CliSiTef.IniciaFuncaoSiTefInterativo(funcao: 0, valor: req.Amount, /* ... */);
+
+        while (rc == 10000) // 10000 = "continua o loop"
+        {
+            var prompt = CliSiTef.LeUltimoComando();
+            var ev = TefEventMapper.From(prompt);   // traduz comando CliSiTef → TefEvent
+            await call.Emit.WriteAsync(ev, ct);
+
+            if (ev.RequiresResponse)
+            {
+                var resp = await call.Received.ReadAsync(ct);
+                rc = CliSiTef.ContinuaFuncaoSiTefInterativo(resp.Buffer, /* ... */);
+            }
+            else
+            {
+                rc = CliSiTef.ContinuaFuncaoSiTefInterativo(null, /* ... */);
+            }
+        }
+
+        if (rc == 0)
+            await call.Emit.WriteAsync(new TefCompleted(/* NSU, auth, receipt */), ct);
+        else
+            await call.Emit.WriteAsync(new TefError(rc, CliSiTef.LeUltimaMensagem()), ct);
+    }
+    catch (OperationCanceledException)
+    {
+        // operador cancelou ou caller disposou → derrubar a transação no SiTef
+        CliSiTef.FinalizaTransacaoSiTef(confirma: 0, /* desfaz */);
+    }
+    finally
+    {
+        call.Emit.Complete();
+    }
+}</code></pre>
+
+    <p>
+      O <code>DuplexCallChannel&lt;TUp, TDown&gt;</code> expõe duas APIs ao mesmo objeto:
+      uma <em>caller-side</em> (que vai pro proxy: <code>SendAsync</code>,
+      <code>Responses</code>) e uma <em>impl-side</em> (que a implementação usa internamente:
+      <code>Emit</code>, <code>Received</code>). É a mesma classe, com pontas opostas.
+    </p>
+
+    <h2 id="confirmacao">Confirmação pós-impressão (gotcha do CliSiTef)</h2>
+    <p>
+      O SiTef <strong>exige</strong> uma confirmação explícita depois que o cupom é impresso —
+      sem ela, a transação fica em estado pendente no adquirente. No modelo duplex isso é só mais
+      uma rodada de evento+resposta no mesmo canal:
+    </p>
+    <pre><code class="lang-cs">await call.Emit.WriteAsync(
+    new TefConfirm("Imprimir via do cliente? Confirme após impressão (S/N)"), ct);
+
+var confirm = await call.Received.ReadAsync(ct);
+if (!confirm.Text.Equals("S", StringComparison.OrdinalIgnoreCase))
+{
+    // desfaz no SiTef
+    CliSiTef.FinalizaTransacaoSiTef(confirma: 0, /* ... */);
+    await call.Emit.WriteAsync(
+        new TefError(-1, "Cliente recusou confirmação. Transação desfeita."), ct);
+    return;
+}
+// confirma
+CliSiTef.FinalizaTransacaoSiTef(confirma: 1, /* ... */);</code></pre>
+
+    <h2 id="cancelamento">Modos de falha — todos cobertos</h2>
+    <table>
+      <thead><tr><th>Situação</th><th>O que acontece</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Operador clica "Cancelar" no Blazor</td>
+          <td>
+            <code>CancellationToken</code> cancela → <code>call.DisposeAsync()</code> →
+            <code>DuplexCancel(corr)</code> chega no agente → <code>cts.Cancel()</code> no
+            <code>RunCliSiTefLoopAsync</code> → o <code>await</code> em
+            <code>call.Received.ReadAsync(ct)</code> joga <code>OperationCanceledException</code> →
+            <code>FinalizaTransacaoSiTef(confirma: 0)</code> no <code>finally</code>.
+          </td>
+        </tr>
+        <tr>
+          <td>Caller fecha o navegador (Blazor circuit perdido)</td>
+          <td>
+            SignalR cliente desconecta → <code>OnDisconnectedAsync</code> no Hub →
+            <code>pendingDuplexes.CancelAllForConnection(...)</code> →
+            mesma cadeia de cancelamento do caso anterior.
+          </td>
+        </tr>
+        <tr>
+          <td>Agente trava ou cai durante o loop</td>
+          <td>
+            <code>OnDisconnectedAsync</code> do agente → o downstream channel é completado com
+            <code>RpcException</code> → o caller pega num <code>catch</code>.
+          </td>
+        </tr>
+        <tr>
+          <td>Resposta do CliSiTef é não-zero (erro de adquirente, cartão recusado)</td>
+          <td>Impl emite <code>TefError</code> com o código e a mensagem.</td>
+        </tr>
+        <tr>
+          <td>Cliente recusa confirmação pós-impressão</td>
+          <td>Vira mais um <code>TefConfirm</code> → <code>TefResponse("N")</code> → impl chama <code>FinalizaTransacaoSiTef(0)</code> e emite <code>TefError</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="outros">Outros casos que viram duplex</h2>
+    <p>O padrão se aplica a qualquer interação multi-rodada:</p>
+    <ul>
+      <li><strong>Cancelamento TEF</strong> — outro método na mesma <code>ITefService</code>, mesma forma de duplex.</li>
+      <li><strong>Pré-autorização e captura</strong> — também duplex.</li>
+      <li><strong>Consulta de saldo</strong> — pode ser request/response simples se não pede input do operador.</li>
+      <li><strong>Coleta de assinatura digital</strong> — duplex (Display "assine" → CollectInput de bitmap → Completed).</li>
+      <li><strong>Operações longas com progresso</strong> (impressão de relatório grande) — pode ser stream simples (<code>IAsyncEnumerable&lt;PrintProgress&gt;</code>) sem precisar de TUp; o RpcKit suporta isso via <code>OpenStreamAsync</code>.</li>
+    </ul>
+
+    <h2 id="proximos">Próximos passos</h2>
+    <ul>
+      <li><a class="link-underline" href="contracts.html">Novos contratos</a> — passo a passo pra criar e registrar.</li>
+      <li><a class="link-underline" href="testing.html">Testes</a> — como cobrir esses fluxos sem hardware real.</li>
+    </ul>
+
+    <footer class="page-foot">
+      <a href="addressing.html">← Endereçamento</a>
+      <a href="contracts.html">Novos contratos →</a>
+    </footer>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

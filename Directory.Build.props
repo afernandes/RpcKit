@@ -1,0 +1,53 @@
+<Project>
+
+  <!-- Compilation defaults — aplicados a TODOS os projetos do repo. -->
+  <PropertyGroup>
+    <TargetFramework Condition="'$(TargetFramework)' == '' AND '$(TargetFrameworks)' == ''">net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors Condition="'$(Configuration)' == 'Release'">true</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+    <NoWarn>$(NoWarn);CS1591;NU5104</NoWarn>
+  </PropertyGroup>
+
+  <!-- Metadata compartilhada por TODOS os pacotes NuGet do repo. Cada lib que opta in
+       define só PackageId + Description + PackageTags. -->
+  <PropertyGroup>
+    <Authors>Anderson Fernandes</Authors>
+    <Company>afernandes</Company>
+    <Copyright>Copyright © Anderson Fernandes</Copyright>
+    <Product>RpcKit</Product>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/afernandes/Rpc</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/afernandes/Rpc</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <PackageReleaseNotes>https://github.com/afernandes/Rpc/releases</PackageReleaseNotes>
+  </PropertyGroup>
+
+  <!-- Default: NÃO empacotar. Cada projeto de biblioteca explicitamente seta IsPackable=true. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- MinVer deriva a versão do NuGet a partir das tags git (vX.Y.Z). -->
+    <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="all" Condition="'$(IsPackable)' == 'true' OR '$(MSBuildProjectName.EndsWith(`Tests`))' == 'true'" />
+
+    <!-- SourceLink — debug "step into" funciona via NuGet.org. -->
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="all" Condition="'$(IsPackable)' == 'true'" />
+  </ItemGroup>
+
+  <!-- MinVer configuration -->
+  <PropertyGroup>
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+    <MinVerDefaultPreReleaseIdentifiers>alpha.0</MinVerDefaultPreReleaseIdentifiers>
+  </PropertyGroup>
+
+</Project>

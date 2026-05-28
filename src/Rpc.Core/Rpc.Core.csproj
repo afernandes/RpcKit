@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>RpcKit.Core</PackageId>
+    <Description>Camada neutra de RpcKit — RpcAddress, IRpcInvoker, IRpcClient, DispatcherRegistry, DuplexCallChannel. Sem dependência de transporte.</Description>
+    <PackageTags>rpc;signalr;duplex;client;routing</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Rpc.Contracts\Rpc.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

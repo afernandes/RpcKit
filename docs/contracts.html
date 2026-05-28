@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Novos contratos — RpcKit</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">Rpc<span class="accent">Kit</span></div>
+    <div class="brand-tagline">SignalR + typed RPC + duplex CliSiTef</div>
+    <nav class="toc">
+      <h4>Começo</h4>
+      <ul>
+        <li><a href="index.html">Visão geral</a></li>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="architecture.html">Arquitetura</a></li>
+      </ul>
+      <h4>Conceitos</h4>
+      <ul>
+        <li><a href="addressing.html">Endereçamento</a></li>
+        <li><a href="duplex.html">Duplex e CliSiTef</a></li>
+        <li><a href="concurrency.html">Concorrência</a></li>
+        <li><a href="contracts.html">Novos contratos</a></li>
+        <li><a href="sourcegen.html">Source Generator</a></li>
+      </ul>
+      <h4>Operação</h4>
+      <ul>
+        <li><a href="testing.html">Testes</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main>
+    <span class="eyebrow">Conceitos</span>
+    <h1>Adicionando um novo contrato</h1>
+    <p class="lede">
+      Proxies e dispatchers são <strong>gerados automaticamente</strong> pelo
+      <code>Rpc.SourceGen</code> a partir das interfaces marcadas com
+      <code>[RpcContract]</code>. Esta página mostra os passos pra adicionar um novo contrato
+      e o padrão que o gerador emite.
+    </p>
+
+    <h2 id="exemplo">Cenário: <code>IInventoryService</code></h2>
+    <p>Vamos criar um contrato que retorna estoque por SKU.</p>
+
+    <h3 id="step1">1. Definir a interface e os DTOs</h3>
+    <p>Em <code>Sample.Contracts</code> (ou no seu próprio assembly de contratos — referencia só <code>Rpc.Contracts</code> e <code>Rpc.Core</code>):</p>
+    <pre><code class="lang-cs">using Rpc.Contracts;
+
+namespace Sample.Contracts;
+
+[RpcContract]
+public interface IInventoryService
+{
+    [RpcMethod(1)]
+    Task&lt;StockLevel&gt; GetStockAsync(string sku, CancellationToken ct);
+
+    [RpcMethod(2, Exclusive = true)]
+    Task&lt;bool&gt; ReserveAsync(string sku, int qty, CancellationToken ct);
+}
+
+public sealed record StockLevel(string Sku, int Quantity, DateTimeOffset MeasuredAt);</code></pre>
+    <div class="callout">
+      <strong>IDs estáveis:</strong> <code>[RpcMethod(N)]</code> é a chave de wire. Use IDs
+      sequenciais e <strong>nunca reuse</strong> — se você deletar um método, queime o ID. Isso
+      mantém clientes antigos funcionando após deploys de servidor.
+    </div>
+
+    <h3 id="step2">2. Compile</h3>
+    <p>
+      O <code>Rpc.SourceGen</code> emite automaticamente, em <code>Sample.Contracts.Generated</code>:
+    </p>
+    <ul>
+      <li><code>InventoryServiceProxy : IInventoryService</code> — serializa args, chama <code>IRpcInvoker</code>.</li>
+      <li><code>InventoryServiceDispatcher</code> com <code>Register(IDispatcherRegistry, IInventoryService impl)</code> — deserializa payload, chama o impl.</li>
+      <li>Records auxiliares <code>__IInventoryService_{Método}_Args</code> para métodos com 2+ parâmetros.</li>
+    </ul>
+    <p>Pra ver os arquivos gerados em disco, adicione no <code>csproj</code>:</p>
+    <pre><code>&lt;EmitCompilerGeneratedFiles&gt;true&lt;/EmitCompilerGeneratedFiles&gt;
+&lt;CompilerGeneratedFilesOutputPath&gt;$(BaseIntermediateOutputPath)GeneratedFiles&lt;/CompilerGeneratedFilesOutputPath&gt;</code></pre>
+    <p>Os <code>.g.cs</code> aparecem em <code>obj/GeneratedFiles/Rpc.SourceGen/Rpc.SourceGen.RpcContractGenerator/</code>.</p>
+
+    <h3 id="step3">3. Tipos de retorno suportados</h3>
+    <table>
+      <thead><tr><th>Retorno</th><th>Gera proxy chamando</th><th>Gera dispatcher registrando</th></tr></thead>
+      <tbody>
+        <tr><td><code>Task&lt;T&gt; / ValueTask&lt;T&gt;</code></td><td><code>InvokeAsync</code></td><td><code>RegisterInvoke</code></td></tr>
+        <tr><td><code>Task / ValueTask</code></td><td><code>InvokeAsync</code> (ignora resultado)</td><td><code>RegisterInvoke</code> (retorna <code>null</code>)</td></tr>
+        <tr><td><code>IAsyncEnumerable&lt;T&gt;</code></td><td><code>OpenStreamAsync</code></td><td><code>RegisterStream</code></td></tr>
+        <tr><td><code>IDuplexCall&lt;TUp, TDown&gt;</code></td><td><code>OpenDuplexAsync</code> + <code>DeferredDuplexCall</code></td><td><code>RegisterDuplex</code> com pumps bidirecionais</td></tr>
+      </tbody>
+    </table>
+
+    <h3 id="step4">4. Implementar o serviço</h3>
+    <pre><code class="lang-cs">public sealed class InventoryServiceImpl(IDbContext db) : IInventoryService
+{
+    public async Task&lt;StockLevel&gt; GetStockAsync(string sku, CancellationToken ct)
+    {
+        var qty = await db.Stocks.Where(s =&gt; s.Sku == sku).Select(s =&gt; s.Quantity).FirstOrDefaultAsync(ct);
+        return new StockLevel(sku, qty, DateTimeOffset.UtcNow);
+    }
+
+    public async Task&lt;IReadOnlyList&lt;StockLevel&gt;&gt; GetStockBatchAsync(IReadOnlyList&lt;string&gt; skus, CancellationToken ct)
+    {
+        var stocks = await db.Stocks.Where(s =&gt; skus.Contains(s.Sku)).ToListAsync(ct);
+        return stocks.Select(s =&gt; new StockLevel(s.Sku, s.Quantity, DateTimeOffset.UtcNow)).ToList();
+    }
+}</code></pre>
+
+    <h3 id="step5">5. Registrar no host</h3>
+
+    <h4>Server-side (em <code>DispatcherStartup.cs</code>):</h4>
+    <pre><code class="lang-cs">public Task StartAsync(CancellationToken cancellationToken)
+{
+    // ... handlers existentes ...
+    InventoryServiceDispatcher.Register(dispatchers, _orderService);  // se for server-side
+
+    proxies.Register(typeof(IInventoryService),
+        (inv, addr) =&gt; new InventoryServiceProxy(inv, addr));
+
+    return Task.CompletedTask;
+}</code></pre>
+
+    <h4>Agent-side (se o handler vive no agente):</h4>
+    <pre><code class="lang-cs">// no Program.cs do agente
+builder.Services.AddSingleton&lt;IInventoryService, InventoryServiceImpl&gt;();
+
+builder.Services.AddSingleton&lt;IHostedService&gt;(sp =&gt;
+{
+    var dispatchers = sp.GetRequiredService&lt;IDispatcherRegistry&gt;();
+    InventoryServiceDispatcher.Register(dispatchers, sp.GetRequiredService&lt;IInventoryService&gt;());
+    return new NoopHostedService();
+});</code></pre>
+
+    <h3 id="step6">6. Usar</h3>
+    <pre><code class="lang-cs">var inventory = Rpc.For&lt;IInventoryService&gt;(RpcAddress.Server);
+var stock = await inventory.GetStockAsync("SKU-001", ct);</code></pre>
+
+    <h2 id="streaming">Contratos com streaming simples</h2>
+    <p>Para streaming unidirecional servidor → cliente, use <code>IAsyncEnumerable&lt;T&gt;</code>:</p>
+    <pre><code class="lang-cs">[RpcContract]
+public interface IPrintJobService
+{
+    [RpcMethod(1)]
+    IAsyncEnumerable&lt;PrintProgress&gt; PrintReportAsync(ReportRequest request, CancellationToken ct);
+}</code></pre>
+    <p>O gerador emite proxy chamando <code>invoker.OpenStreamAsync(...)</code> e dispatcher como async iterator que serializa cada item via <code>JsonSerializer.Serialize</code>.</p>
+
+    <h2 id="duplex">Contratos duplex</h2>
+    <p>Veja a página <a href="duplex.html">Duplex e CliSiTef</a> — exatamente o mesmo padrão, mas usando <code>IDuplexCall&lt;TUp, TDown&gt;</code> como retorno e <code>OpenDuplexAsync</code> no proxy.</p>
+
+    <h2 id="versionamento">Versionamento</h2>
+    <ul>
+      <li><strong>Adicionar campo opcional</strong> a um DTO: compatível dos dois lados se o System.Text.Json ignorar membros faltantes (padrão).</li>
+      <li><strong>Adicionar novo método</strong> a um contrato: use o próximo ID livre. Clientes antigos simplesmente não chamam.</li>
+      <li><strong>Renomear um método</strong>: mantenha o ID do <code>[RpcMethod]</code>. O nome em C# muda, o wire não.</li>
+      <li><strong>Remover um método</strong>: queime o ID. Não reutilize esse ID nunca, pra não confundir clientes que ainda chamam.</li>
+      <li><strong>Alterar tipo de retorno</strong>: é uma quebra. Crie um <code>[RpcMethod(N+1)]</code> novo e marque o antigo como <code>[Obsolete]</code>.</li>
+    </ul>
+
+    <footer class="page-foot">
+      <a href="duplex.html">← Duplex e CliSiTef</a>
+      <a href="sourcegen.html">Source Generator →</a>
+    </footer>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

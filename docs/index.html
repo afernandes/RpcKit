@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RpcKit — RPC tipado para MAUI + ASP.NET + Blazor</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">Rpc<span class="accent">Kit</span></div>
+    <div class="brand-tagline">SignalR + typed RPC + duplex CliSiTef</div>
+    <nav class="toc">
+      <h4>Começo</h4>
+      <ul>
+        <li><a href="index.html">Visão geral</a></li>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="architecture.html">Arquitetura</a></li>
+      </ul>
+      <h4>Conceitos</h4>
+      <ul>
+        <li><a href="addressing.html">Endereçamento</a></li>
+        <li><a href="duplex.html">Duplex e CliSiTef</a></li>
+        <li><a href="concurrency.html">Concorrência</a></li>
+        <li><a href="contracts.html">Novos contratos</a></li>
+        <li><a href="sourcegen.html">Source Generator</a></li>
+      </ul>
+      <h4>Operação</h4>
+      <ul>
+        <li><a href="testing.html">Testes</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main>
+    <span class="eyebrow">Documentação</span>
+    <h1>RpcKit</h1>
+    <p class="lede">
+      RPC bidirecional tipado para sistemas multi-superfície em .NET — MAUI (Windows/Android),
+      ASP.NET, Blazor Server e agentes de hardware locais — usando <strong>SignalR</strong>
+      como transporte único e uma camada fina de tipagem por cima.
+    </p>
+
+    <h2 id="cenarios">Os quatro cenários, um único mecanismo</h2>
+    <div class="cards">
+      <div class="card">
+        <div class="card-num">CASO 1</div>
+        <h3>Cliente → Servidor</h3>
+        <p>MAUI ou Blazor chama um handler tipado hospedado no ASP.NET. Endereço:
+        <code>RpcAddress.Server</code>.</p>
+      </div>
+      <div class="card">
+        <div class="card-num">CASO 2</div>
+        <h3>Cliente A → Cliente B</h3>
+        <p>Peer-to-peer com o servidor como relay. Endereço:
+        <code>RpcAddress.Device("PDV-02")</code>.</p>
+      </div>
+      <div class="card">
+        <div class="card-num">CASO 3</div>
+        <h3>Browser → TEF pinpad</h3>
+        <p>Blazor dispara o loop interativo do CliSiTef no agente do PDV.
+        Duplex bidirecional. <code>RpcAddress.User(uid, Capability.Tef)</code>.</p>
+      </div>
+      <div class="card">
+        <div class="card-num">CASO 4</div>
+        <h3>Browser → impressora</h3>
+        <p>Roteamento por capability — qualquer agente do tenant que declarou aquela impressora.
+        <code>RpcAddress.Role(Capability.PrinterKitchen, tenantId)</code>.</p>
+      </div>
+    </div>
+
+    <h2 id="porque">Por que um mecanismo só</h2>
+    <p>
+      Os quatro casos são <strong>o mesmo problema arquitetural</strong>: invocar uma operação
+      tipada num endpoint remoto identificado, com resposta. Diferem só em payload e endereçamento.
+      Construir três stacks distintos (REST + gRPC + socket de impressora) triplica auth,
+      reconexão, observabilidade.
+    </p>
+    <p>
+      SignalR resolve a parte difícil — transporte WebSocket sobre HTTPS, reconexão automática,
+      scale-out, autenticação ASP.NET, streaming nativo. RpcKit adiciona o que falta:
+      <strong>endereçamento tipado, roteamento por capability e duplex de primeira classe</strong>
+      para loops interativos como o do CliSiTef.
+    </p>
+
+    <h2 id="camadas">Camadas em uma imagem</h2>
+    <div class="diagram">
+      <svg viewBox="0 0 720 360" role="img" aria-label="Diagrama de camadas do RpcKit">
+        <defs>
+          <style>
+            .box { fill: #111a2e; stroke: #2c3d5e; stroke-width: 1.5; rx: 8; }
+            .box-core { fill: #0f2440; stroke: #38bdf8; stroke-width: 2; }
+            .label { fill: #e2e8f0; font: 500 14px var(--font-mono, monospace); }
+            .sub { fill: #94a3b8; font: 11px var(--font-mono, monospace); }
+            .arrow { stroke: #38bdf8; stroke-width: 1.5; fill: none; marker-end: url(#a); }
+          </style>
+          <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M0,0 L10,5 L0,10 z" fill="#38bdf8" />
+          </marker>
+        </defs>
+
+        <rect class="box" x="260" y="20" width="200" height="50" rx="8" />
+        <text class="label" x="360" y="44" text-anchor="middle">Rpc.Contracts</text>
+        <text class="sub" x="360" y="60" text-anchor="middle">interfaces · IDuplexCall</text>
+
+        <rect class="box box-core" x="220" y="120" width="280" height="60" rx="8" />
+        <text class="label" x="360" y="146" text-anchor="middle">Rpc.Core</text>
+        <text class="sub" x="360" y="164" text-anchor="middle">RpcAddress · Invoker · Dispatchers</text>
+
+        <rect class="box" x="40" y="240" width="280" height="60" rx="8" />
+        <text class="label" x="180" y="266" text-anchor="middle">Rpc.SignalR.Server</text>
+        <text class="sub" x="180" y="284" text-anchor="middle">RpcHub · Router · DeviceRegistry</text>
+
+        <rect class="box" x="400" y="240" width="280" height="60" rx="8" />
+        <text class="label" x="540" y="266" text-anchor="middle">Rpc.SignalR.Client</text>
+        <text class="sub" x="540" y="284" text-anchor="middle">SignalRRpcInvoker · ConnectionHost</text>
+
+        <path class="arrow" d="M360 70 L360 118" />
+        <path class="arrow" d="M310 180 L200 238" />
+        <path class="arrow" d="M410 180 L520 238" />
+      </svg>
+      <div class="caption">
+        Contratos e Core são transport-neutros. SignalR fica nas extremidades.
+        Trocar transporte (ex: LAN futura) muda só a camada de cima — contratos e proxies não.
+      </div>
+    </div>
+
+    <h2 id="exemplo">Em 30 segundos — o caso TEF</h2>
+    <p>
+      O contrato modela o loop CliSiTef como duplex: o agente emite <code>TefEvent</code> a cada
+      iteração; a UI envia <code>TefResponse</code> quando o operador responde.
+    </p>
+    <pre><code class="lang-cs">[RpcContract]
+public interface ITefService
+{
+    [RpcMethod(Id = 1)]
+    IDuplexCall&lt;TefResponse, TefEvent&gt; Charge(TefRequest initial, CancellationToken ct);
+}</code></pre>
+
+    <p>No componente Blazor:</p>
+    <pre><code class="lang-cs">await using var call = Rpc.For&lt;ITefService&gt;(
+        RpcAddress.User(currentUserId, Capability.Tef))
+    .Charge(new TefRequest(amount, userId, reference), ct);
+
+await foreach (var ev in call.Responses.WithCancellation(ct))
+{
+    switch (ev)
+    {
+        case TefDisplayMessage m: ShowMessage(m.Text); break;
+        case TefCollectInput ask:
+            await call.SendAsync(new TefResponse(await PromptUser(ask)));
+            break;
+        case TefMenu menu:
+            await call.SendAsync(new TefResponse(await PickMenu(menu)));
+            break;
+        case TefConfirm c:
+            await call.SendAsync(new TefResponse(await Confirm(c) ? "S" : "N"));
+            break;
+        case TefCompleted ok: return ok;
+        case TefError err: throw new TefException(err);
+    }
+}</code></pre>
+
+    <div class="callout">
+      <strong>A sessão é o par de canais.</strong> Sem <code>transactionId</code> correlacionando
+      chamadas avulsas. Cancelar o <code>CancellationToken</code> derruba o loop atomicamente nos
+      dois lados; desconectar o agente fecha a sessão e o Blazor recebe
+      <code>OperationCanceledException</code> sem precisar de polling.
+    </div>
+
+    <h2 id="proximos">Próximos passos</h2>
+    <ul>
+      <li><a class="link-underline" href="quickstart.html">Quickstart</a> — compilar, testar, rodar samples.</li>
+      <li><a class="link-underline" href="architecture.html">Arquitetura</a> — camadas, roteamento, fluxo do duplex remoto.</li>
+      <li><a class="link-underline" href="duplex.html">Duplex e CliSiTef</a> — modelagem profunda do loop interativo.</li>
+      <li><a class="link-underline" href="contracts.html">Novos contratos</a> — adicionar um contrato hoje (proxies à mão) e o que mudará com o source generator.</li>
+    </ul>
+
+    <footer class="page-foot">
+      <span>RpcKit · documentação</span>
+      <a href="quickstart.html">Próxima: Quickstart →</a>
+    </footer>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

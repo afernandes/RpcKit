@@ -1,0 +1,239 @@
+@page "/tef"
+@using Rpc.Contracts
+@using Sample.Contracts
+@using Sample.Contracts.Gateways
+@inject ITefGateway TefGateway
+
+<PageTitle>TEF (Software Express / CliSiTef)</PageTitle>
+
+<h1>Cobrança TEF</h1>
+
+<p>Esta página demonstra o caso 3 do plano: o Blazor Server dispara uma transação TEF
+no pinpad do agente local do usuário (capability <code>tef</code>).</p>
+
+<EditForm Model="this" OnValidSubmit="StartChargeAsync" FormName="tef-charge">
+    <div class="mb-2">
+        <label>Operador (vai na requisição TEF; roteamento é via ICurrentUser)</label>
+        <InputText class="form-control" @bind-Value="OperatorId" />
+    </div>
+    <div class="mb-2">
+        <label>Valor</label>
+        <InputNumber class="form-control" @bind-Value="Amount" />
+    </div>
+    <div class="mb-2">
+        <label>Referência</label>
+        <InputText class="form-control" @bind-Value="Reference" />
+    </div>
+    <button type="submit" class="btn btn-primary" disabled="@_running">Iniciar transação</button>
+    <button type="button" class="btn btn-secondary" @onclick="CancelAsync" disabled="@(!_running)">Cancelar</button>
+</EditForm>
+
+<hr />
+
+<div class="alert alert-info" hidden="@(_currentMessage is null)">
+    <strong>Pinpad:</strong> @_currentMessage
+</div>
+
+@if (_pendingInput is not null)
+{
+    <div class="card my-2">
+        <div class="card-body">
+            <p>@_pendingInput.Prompt</p>
+            <InputText class="form-control" @bind-Value="_inputValue" />
+            <button class="btn btn-primary mt-2" @onclick="SubmitInputAsync">Enviar</button>
+        </div>
+    </div>
+}
+
+@if (_pendingMenu is not null)
+{
+    <div class="card my-2">
+        <div class="card-body">
+            <p>@_pendingMenu.Title</p>
+            @for (var i = 0; i < _pendingMenu.Options.Count; i++)
+            {
+                var idx = i;
+                <button class="btn btn-outline-primary me-1 mb-1"
+                        @onclick="() => SubmitMenuAsync(idx + 1)">
+                    @(idx + 1). @_pendingMenu.Options[idx]
+                </button>
+            }
+            <button class="btn btn-outline-danger ms-2 mb-1" @onclick="() => SubmitMenuAsync(9)">Cancelar</button>
+        </div>
+    </div>
+}
+
+@if (_pendingConfirm is not null)
+{
+    <div class="card my-2">
+        <div class="card-body">
+            <p>@_pendingConfirm.Prompt</p>
+            <button class="btn btn-success me-1" @onclick="() => SubmitConfirmAsync(true)">Sim, confirmar</button>
+            <button class="btn btn-danger" @onclick="() => SubmitConfirmAsync(false)">Não, desfazer</button>
+        </div>
+    </div>
+}
+
+@if (_result is not null)
+{
+    <div class="alert alert-success">
+        <h5>Transação aprovada</h5>
+        <div>NSU: <code>@_result.Nsu</code></div>
+        <div>Autorização: <code>@_result.AuthorizationCode</code></div>
+        <pre class="mt-2">@_result.Receipt</pre>
+    </div>
+}
+
+@if (_error is not null)
+{
+    <div class="alert alert-danger">
+        <strong>Erro:</strong> @_error
+    </div>
+}
+
+@if (_log.Count > 0)
+{
+    <h5>Log da sessão</h5>
+    <ul class="list-group">
+        @foreach (var line in _log)
+        {
+            <li class="list-group-item small">@line</li>
+        }
+    </ul>
+}
+
+@code {
+    private string OperatorId { get; set; } = "operator-01";
+    private decimal Amount { get; set; } = 50.00m;
+    private string Reference { get; set; } = "REF-001";
+
+    private bool _running;
+    private string? _currentMessage;
+    private TefCollectInput? _pendingInput;
+    private TefMenu? _pendingMenu;
+    private TefConfirm? _pendingConfirm;
+    private TefCompleted? _result;
+    private string? _error;
+    private string _inputValue = "";
+    private readonly List<string> _log = new();
+
+    private IDuplexCall<TefResponse, TefEvent>? _call;
+    private CancellationTokenSource? _cts;
+
+    private async Task StartChargeAsync()
+    {
+        Reset();
+        _running = true;
+        _cts = new CancellationTokenSource();
+        try
+        {
+            // ITefGateway abstrai se vamos direto via CliSiTef (MAUI) ou via RPC (aqui, Blazor Server).
+            // A página não muda quando o deployment mudar.
+            _call = TefGateway.Charge(new TefRequest(Amount, OperatorId, Reference), _cts.Token);
+            _ = ConsumeAsync(_call, _cts.Token);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+            _running = false;
+        }
+    }
+
+    private async Task ConsumeAsync(IDuplexCall<TefResponse, TefEvent> call, CancellationToken ct)
+    {
+        try
+        {
+            await foreach (var ev in call.Responses.WithCancellation(ct))
+            {
+                _log.Add($"<- {ev.GetType().Name}");
+                switch (ev)
+                {
+                    case TefDisplayMessage m:
+                        _currentMessage = m.Text;
+                        break;
+                    case TefCollectInput input:
+                        _pendingInput = input;
+                        _inputValue = "";
+                        break;
+                    case TefMenu menu:
+                        _pendingMenu = menu;
+                        break;
+                    case TefConfirm conf:
+                        _pendingConfirm = conf;
+                        break;
+                    case TefCompleted ok:
+                        _result = ok;
+                        _running = false;
+                        break;
+                    case TefError err:
+                        _error = $"({err.Code}) {err.Message}";
+                        _running = false;
+                        break;
+                }
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _error = "Transação cancelada.";
+            _running = false;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+            _running = false;
+            await InvokeAsync(StateHasChanged);
+        }
+        finally
+        {
+            if (_call is not null) await _call.DisposeAsync();
+            _call = null;
+        }
+    }
+
+    private async Task SubmitInputAsync()
+    {
+        if (_call is null || _pendingInput is null) return;
+        var resp = new TefResponse(_inputValue);
+        _log.Add($"-> {resp.Text}");
+        _pendingInput = null;
+        await _call.SendAsync(resp);
+    }
+
+    private async Task SubmitMenuAsync(int choice)
+    {
+        if (_call is null) return;
+        var resp = new TefResponse(choice.ToString());
+        _log.Add($"-> menu choice {choice}");
+        _pendingMenu = null;
+        await _call.SendAsync(resp);
+    }
+
+    private async Task SubmitConfirmAsync(bool confirm)
+    {
+        if (_call is null) return;
+        var resp = new TefResponse(confirm ? "S" : "N");
+        _log.Add($"-> confirm {(confirm ? "S" : "N")}");
+        _pendingConfirm = null;
+        await _call.SendAsync(resp);
+    }
+
+    private async Task CancelAsync()
+    {
+        if (_cts is not null) await _cts.CancelAsync();
+    }
+
+    private void Reset()
+    {
+        _running = false;
+        _currentMessage = null;
+        _pendingInput = null;
+        _pendingMenu = null;
+        _pendingConfirm = null;
+        _result = null;
+        _error = null;
+        _inputValue = "";
+        _log.Clear();
+    }
+}

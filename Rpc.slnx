@@ -1,0 +1,17 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/Sample.Contracts/Sample.Contracts.csproj" />
+    <Project Path="samples/Sample.LocalAgent/Sample.LocalAgent.csproj" />
+    <Project Path="samples/Sample.Server.Api/Sample.Server.Api.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Rpc.Contracts/Rpc.Contracts.csproj" />
+    <Project Path="src/Rpc.Core/Rpc.Core.csproj" />
+    <Project Path="src/Rpc.SignalR.Client/Rpc.SignalR.Client.csproj" />
+    <Project Path="src/Rpc.SignalR.Server/Rpc.SignalR.Server.csproj" />
+    <Project Path="src/Rpc.SourceGen/Rpc.SourceGen.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Rpc.IntegrationTests/Rpc.IntegrationTests.csproj" />
+  </Folder>
+</Solution>

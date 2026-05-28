@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Quickstart — RpcKit</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">Rpc<span class="accent">Kit</span></div>
+    <div class="brand-tagline">SignalR + typed RPC + duplex CliSiTef</div>
+    <nav class="toc">
+      <h4>Começo</h4>
+      <ul>
+        <li><a href="index.html">Visão geral</a></li>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="architecture.html">Arquitetura</a></li>
+      </ul>
+      <h4>Conceitos</h4>
+      <ul>
+        <li><a href="addressing.html">Endereçamento</a></li>
+        <li><a href="duplex.html">Duplex e CliSiTef</a></li>
+        <li><a href="concurrency.html">Concorrência</a></li>
+        <li><a href="contracts.html">Novos contratos</a></li>
+        <li><a href="sourcegen.html">Source Generator</a></li>
+      </ul>
+      <h4>Operação</h4>
+      <ul>
+        <li><a href="testing.html">Testes</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main>
+    <span class="eyebrow">Começo</span>
+    <h1>Quickstart</h1>
+    <p class="lede">Em quatro comandos: compilar, testar, subir servidor + agente, abrir o navegador.</p>
+
+    <h2 id="prereq">Pré-requisitos</h2>
+    <ul>
+      <li>.NET SDK <strong>10.0.300</strong> (versão pinada em <code>global.json</code>; <code>rollForward: latestFeature</code> permite patches).</li>
+      <li>Windows, macOS ou Linux. SignalR usa WebSocket sobre HTTPS — passa por proxy corporativo.</li>
+      <li>Sem dependência de Redis, banco ou broker para o cenário cloud-first padrão.</li>
+    </ul>
+
+    <h2 id="passos">Passos</h2>
+
+    <h3 id="p1">1. Compilar</h3>
+    <pre><code>dotnet build Rpc.slnx</code></pre>
+    <p>9 projetos. Build limpo, sem warnings, em ~25s na primeira vez (NuGet restore) e ~5s incremental.</p>
+
+    <h3 id="p2">2. Rodar os 7 testes de integração</h3>
+    <pre><code>dotnet test tests/Rpc.IntegrationTests</code></pre>
+    <p>Cobre os quatro casos do plano + cancelamento do duplex + roteamento para device offline.</p>
+    <div class="callout">
+      <strong>O que prova:</strong> a fixture <code>RpcTestFixture</code> sobe o
+      <code>Sample.Server.Api</code> via <code>WebApplicationFactory</code> e abre conexões SignalR
+      <em>in-memory</em> para caller e agente. O caminho de código é o mesmo que vai pra produção
+      — só não trafega TCP.
+    </div>
+
+    <h3 id="p3">3. Subir servidor + Blazor</h3>
+    <pre><code>dotnet run --project samples/Sample.Server.Api</code></pre>
+    <p>Boota o Hub em <code>http://localhost:5XXX/rpc</code> (porta no <code>launchSettings.json</code>) e o Blazor Server em <code>/</code>.</p>
+
+    <h3 id="p4">4. Subir agente local em outra janela</h3>
+    <pre><code>dotnet run --project samples/Sample.LocalAgent</code></pre>
+    <p>O agente lê <code>Rpc:HubUrl</code> do appsettings ou usa <code>http://localhost:5000/rpc</code> por padrão. Conecta declarando capabilities <code>tef</code>, <code>printer.kitchen</code> e <code>pos.terminal</code>.</p>
+    <p>Para testar com mais de um agente, varie o <code>DeviceId</code>:</p>
+    <pre><code>dotnet run --project samples/Sample.LocalAgent -- --Rpc:DeviceId=PDV-02 --Rpc:UserId=operator-2</code></pre>
+
+    <h3 id="p5">5. Abrir o navegador</h3>
+    <p>Vá até a raiz do servidor e clique pelas demos:</p>
+    <table>
+      <thead><tr><th>Rota</th><th>O que demonstra</th><th>Caso</th></tr></thead>
+      <tbody>
+        <tr><td><code>/orders</code></td><td><code>IOrderService</code> no servidor</td><td>1</td></tr>
+        <tr><td><code>/ping</code></td><td>Peer-to-peer com <code>DeviceId</code></td><td>2</td></tr>
+        <tr><td><code>/tef</code></td><td>Loop CliSiTef completo na UI</td><td>3</td></tr>
+        <tr><td><code>/print</code></td><td>Impressão por capability + tenant</td><td>4</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="config">Configuração do agente</h2>
+    <p>O <code>Sample.LocalAgent</code> aceita estes valores (via <code>appsettings.json</code>, env vars ou CLI args):</p>
+    <table>
+      <thead><tr><th>Chave</th><th>Default</th><th>Uso</th></tr></thead>
+      <tbody>
+        <tr><td><code>Rpc:HubUrl</code></td><td><code>http://localhost:5000/rpc</code></td><td>URL do Hub</td></tr>
+        <tr><td><code>Rpc:DeviceId</code></td><td><code>&lt;machine&gt;:agent</code></td><td>Identificação única do device</td></tr>
+        <tr><td><code>Rpc:UserId</code></td><td>—</td><td>Para <code>RpcAddress.User(...)</code> resolver</td></tr>
+        <tr><td><code>Rpc:TenantId</code></td><td>—</td><td>Para <code>RpcAddress.Role(...)</code> filtrar</td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="entendi">Entendi, e agora?</h2>
+    <ul>
+      <li><a class="link-underline" href="architecture.html">Arquitetura</a> — entenda o roteamento e o padrão de correlation usado pra duplex remoto.</li>
+      <li><a class="link-underline" href="duplex.html">Duplex e CliSiTef</a> — modelagem detalhada do loop interativo.</li>
+      <li><a class="link-underline" href="contracts.html">Novos contratos</a> — adicionar o seu primeiro contrato.</li>
+    </ul>
+
+    <footer class="page-foot">
+      <a href="index.html">← Visão geral</a>
+      <a href="architecture.html">Arquitetura →</a>
+    </footer>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

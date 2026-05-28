@@ -1,0 +1,39 @@
+@page "/orders"
+@using Rpc.Core
+@using Sample.Contracts
+@inject IRpcClient Rpc
+
+<PageTitle>Comandas abertas (server-side handler)</PageTitle>
+
+<h1>Comandas abertas</h1>
+
+<p>Caso 1 do plano: chamada simples ao handler no servidor via <code>RpcAddress.Server</code>.</p>
+
+<button class="btn btn-primary" @onclick="LoadAsync">Recarregar</button>
+
+@if (_orders is null)
+{
+    <p>Clique para carregar.</p>
+}
+else
+{
+    <table class="table mt-3">
+        <thead><tr><th>Pedido</th><th>Mesa</th><th>Total</th></tr></thead>
+        <tbody>
+        @foreach (var o in _orders.Orders)
+        {
+            <tr><td>@o.OrderId</td><td>@o.TableName</td><td>R$ @o.Total.ToString("0.00")</td></tr>
+        }
+        </tbody>
+    </table>
+}
+
+@code {
+    private OpenOrdersResult? _orders;
+
+    private async Task LoadAsync()
+    {
+        var svc = Rpc.For<IOrderService>(RpcAddress.Server);
+        _orders = await svc.GetOpenOrdersAsync(default);
+    }
+}

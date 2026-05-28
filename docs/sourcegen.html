@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Source Generator — RpcKit</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">Rpc<span class="accent">Kit</span></div>
+    <div class="brand-tagline">SignalR + typed RPC + duplex CliSiTef</div>
+    <nav class="toc">
+      <h4>Começo</h4>
+      <ul>
+        <li><a href="index.html">Visão geral</a></li>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="architecture.html">Arquitetura</a></li>
+      </ul>
+      <h4>Conceitos</h4>
+      <ul>
+        <li><a href="addressing.html">Endereçamento</a></li>
+        <li><a href="duplex.html">Duplex e CliSiTef</a></li>
+        <li><a href="concurrency.html">Concorrência</a></li>
+        <li><a href="contracts.html">Novos contratos</a></li>
+        <li><a href="sourcegen.html">Source Generator</a></li>
+      </ul>
+      <h4>Operação</h4>
+      <ul>
+        <li><a href="testing.html">Testes</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main>
+    <span class="eyebrow">Conceitos</span>
+    <h1>Source Generator</h1>
+    <p class="lede">
+      <code>Rpc.SourceGen</code> é um Roslyn generator que detecta interfaces marcadas com
+      <code>[RpcContract]</code> e emite <strong>proxy + dispatcher</strong> em tempo de
+      compilação. Você só escreve a interface; o resto vira código gerado.
+    </p>
+
+    <div class="callout">
+      <strong>Sem o gerador:</strong> ~30 linhas hand-written por contrato (proxy + dispatcher
+      + serialização) que precisam ficar sincronizadas com a interface.<br/>
+      <strong>Com o gerador:</strong> 0 linhas. A interface é a única fonte de verdade.
+    </div>
+
+    <h2 id="quando">Quando usar (e quando NÃO usar)</h2>
+    <table>
+      <thead><tr><th>Use quando</th><th>NÃO use quando</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Você está definindo um novo contrato <code>[RpcContract]</code>.</td>
+          <td>O método precisa de <code>out</code> ou <code>ref</code> params.</td>
+        </tr>
+        <tr>
+          <td>Os retornos cabem em <code>Task&lt;T&gt;</code>, <code>Task</code>, <code>IAsyncEnumerable&lt;T&gt;</code> ou <code>IDuplexCall&lt;TUp, TDown&gt;</code>.</td>
+          <td>O método é genérico (<code>Task&lt;T&gt; Foo&lt;T&gt;()</code>) — generic methods não são suportados.</td>
+        </tr>
+        <tr>
+          <td>Os parâmetros são tipos JSON-serializáveis.</td>
+          <td>Você precisa de wire-format customizado (MessagePack, Protobuf) — esse generator só emite código que usa <code>System.Text.Json</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="instalacao">Instalação</h2>
+
+    <h3 id="via-nuget">Via NuGet (consumidor da biblioteca)</h3>
+    <pre><code>dotnet add package RpcKit.SourceGen</code></pre>
+    <p>
+      <strong>Importante:</strong> o package também precisa que você tenha
+      <code>RpcKit.Contracts</code> (para as anotações <code>[RpcContract]</code>) e
+      <code>RpcKit.Core</code> (para os tipos referenciados no código gerado:
+      <code>IRpcInvoker</code>, <code>RpcAddress</code>, <code>DeferredDuplexCall</code>, etc).
+      Esses são puxados automaticamente se você instalou <code>RpcKit.SignalR.Client</code> ou
+      <code>RpcKit.SignalR.Server</code>.
+    </p>
+
+    <h3 id="via-project-ref">Via ProjectReference (dev local nos kits)</h3>
+    <pre><code>&lt;ItemGroup&gt;
+  &lt;ProjectReference Include="..\..\src\Rpc.SourceGen\Rpc.SourceGen.csproj"
+                    OutputItemType="Analyzer"
+                    ReferenceOutputAssembly="false" /&gt;
+&lt;/ItemGroup&gt;</code></pre>
+    <p>
+      Os dois atributos <strong>são obrigatórios</strong>: <code>OutputItemType="Analyzer"</code>
+      faz o MSBuild passar a DLL pro compilador C# como analyzer (não como referência runtime);
+      <code>ReferenceOutputAssembly="false"</code> evita que a DLL do generator seja copiada pra
+      <code>bin/</code>.
+    </p>
+
+    <h2 id="passo-a-passo">Passo a passo: do zero ao RPC funcionando</h2>
+
+    <h3 id="step1">Passo 1 — Defina a interface</h3>
+    <pre><code class="lang-cs">using Rpc.Contracts;
+
+namespace MyApp.Contracts;
+
+[RpcContract]
+public interface IInventoryService
+{
+    [RpcMethod(1)]
+    Task&lt;StockLevel&gt; GetStockAsync(string sku, CancellationToken ct);
+
+    [RpcMethod(2, Exclusive = true)]
+    Task&lt;bool&gt; ReserveAsync(string sku, int qty, string customerId, CancellationToken ct);
+
+    [RpcMethod(3)]
+    IAsyncEnumerable&lt;StockMovement&gt; StreamMovementsAsync(string sku, CancellationToken ct);
+
+    [RpcMethod(4)]
+    IDuplexCall&lt;StockCommand, StockEvent&gt; SubscribeAsync(SubscribeRequest req, CancellationToken ct);
+}
+
+public sealed record StockLevel(string Sku, int Quantity, DateTimeOffset MeasuredAt);
+public sealed record StockMovement(DateTimeOffset At, int Delta, string Reason);
+public sealed record SubscribeRequest(string[] Skus);
+public abstract record StockCommand;
+public abstract record StockEvent;</code></pre>
+
+    <h3 id="step2">Passo 2 — Compile</h3>
+    <p>
+      É só rodar <code>dotnet build</code>. O gerador roda durante a compilação e produz
+      <strong>um arquivo por interface</strong>:
+    </p>
+    <pre><code>YourProject/obj/Debug/net10.0/generated/Rpc.SourceGen/Rpc.SourceGen.RpcContractGenerator/
+└── IInventoryService.RpcGenerated.g.cs</code></pre>
+    <p>
+      Esse arquivo contém:
+    </p>
+    <ul>
+      <li><code>MyApp.Contracts.Generated.InventoryServiceProxy</code> — implementa <code>IInventoryService</code>, serializa args, chama <code>IRpcInvoker</code>.</li>
+      <li><code>MyApp.Contracts.Generated.InventoryServiceDispatcher</code> — método estático <code>Register(IDispatcherRegistry, IInventoryService)</code>.</li>
+      <li>Records auxiliares <code>__IInventoryService_{Method}_Args</code> pra métodos com 2+ parâmetros.</li>
+    </ul>
+
+    <h3 id="step3">Passo 3 — Registre o proxy no caller (3 opções)</h3>
+    <p>O gerador emite <strong>extension methods</strong> que escondem o boilerplate.</p>
+
+    <p><strong>Opção A — Registra TUDO de uma vez</strong> (recomendado quando todos os contratos do assembly são usados):</p>
+    <pre><code class="lang-cs">using MyApp.Contracts.Generated;
+
+// no DI setup do caller — uma linha registra todos os proxies do assembly:
+proxies.AddAllMyAppContractsProxies();
+//      └──────────────────────────┘
+//      "MyAppContracts" vem do AssemblyName, garante unicidade quando
+//      múltiplos kits são consumidos juntos (TefKit + PrintKit + ...).</code></pre>
+
+    <p><strong>Opção B — Por contrato</strong> (quando você quer escolher quais registrar):</p>
+    <pre><code class="lang-cs">proxies.AddInventoryServiceProxy()
+       .AddOrderServiceProxy()
+       .AddPosTerminalProxy();
+//      └────────────────┘
+//      gerado por contrato — sintaxe fluente.</code></pre>
+
+    <p><strong>Opção C — Manual (legado)</strong>, ainda funciona:</p>
+    <pre><code class="lang-cs">proxies.Register(typeof(IInventoryService),
+    static (inv, addr) =&gt; new InventoryServiceProxy(inv, addr));</code></pre>
+
+    <h3 id="step4">Passo 4 — Registre o dispatcher no agente/servidor (3 opções)</h3>
+    <p>O lado que TEM a implementação registra o dispatcher gerado.</p>
+
+    <p><strong>Opção A — Explícita, com o impl em mãos</strong>:</p>
+    <pre><code class="lang-cs">using MyApp.Contracts.Generated;
+
+var impl = new InventoryServiceImpl(db);
+dispatchers.AddInventoryServiceDispatcher(impl);</code></pre>
+
+    <p><strong>Opção B — DI resolve o impl</strong> (concisa quando o impl já está no container):</p>
+    <pre><code class="lang-cs">dispatchers.AddInventoryServiceDispatcher(serviceProvider);
+//                                       └─────────────┘
+//                                       resolve via sp.GetService(typeof(IInventoryService))
+//                                       — lança InvalidOperationException se não registrada.</code></pre>
+
+    <p><strong>Opção C — Estática</strong> (gerada também, equivalente à opção A):</p>
+    <pre><code class="lang-cs">InventoryServiceDispatcher.Register(dispatchers, impl);</code></pre>
+
+    <div class="callout">
+      <strong>Por que o nome do método inclui o assembly?</strong> Para evitar colisão.
+      <code>TefKit.Contracts</code> emite <code>AddAllTefKitContractsProxies</code>;
+      <code>PrintKit.Contracts</code> emite <code>AddAllPrintKitContractsProxies</code>. Se ambos
+      registrassem <code>AddAllGeneratedProxies</code>, o C# rejeitaria a chamada como ambígua
+      quando os dois <code>using</code> estivessem em escopo. Os métodos POR CONTRATO
+      (<code>AddInventoryServiceProxy</code>) já são únicos por natureza.
+    </div>
+
+    <h3 id="step5">Passo 5 — Use</h3>
+    <pre><code class="lang-cs">// no caller:
+var inv = Rpc.For&lt;IInventoryService&gt;(RpcAddress.Server);
+var stock = await inv.GetStockAsync("SKU-001", ct);
+
+// duplex:
+await using var sub = inv.SubscribeAsync(new SubscribeRequest(["SKU-1", "SKU-2"]), ct);
+await sub.SendAsync(new StartCommand(...));
+await foreach (var evt in sub.Responses.WithCancellation(ct))
+    Process(evt);
+
+// stream:
+await foreach (var mov in inv.StreamMovementsAsync("SKU-001", ct).WithCancellation(ct))
+    Display(mov);</code></pre>
+
+    <h2 id="retornos">Tipos de retorno suportados</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Retorno na interface</th>
+          <th>Gera proxy chamando</th>
+          <th>Gera dispatcher registrando</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>Task&lt;T&gt;</code> / <code>ValueTask&lt;T&gt;</code></td>
+          <td><code>IRpcInvoker.InvokeAsync</code> + <code>JsonSerializer.Deserialize&lt;T&gt;</code></td>
+          <td><code>RegisterInvoke</code> — chama impl + serializa <code>T</code></td>
+        </tr>
+        <tr>
+          <td><code>Task</code> / <code>ValueTask</code></td>
+          <td><code>IRpcInvoker.InvokeAsync</code> ignorando o resultado</td>
+          <td><code>RegisterInvoke</code> — chama impl + retorna <code>null</code></td>
+        </tr>
+        <tr>
+          <td><code>IAsyncEnumerable&lt;T&gt;</code></td>
+          <td><code>OpenStreamAsync</code> + async iterator deserializando cada chunk</td>
+          <td><code>RegisterStream</code> — método privado async iterator serializando cada item</td>
+        </tr>
+        <tr>
+          <td><code>IDuplexCall&lt;TUp, TDown&gt;</code></td>
+          <td><code>OpenDuplexAsync</code> + retorna <code>DeferredDuplexCall&lt;TUp, TDown&gt;</code></td>
+          <td><code>RegisterDuplex</code> com pumps bidirecionais (upstream → impl + impl.Responses → downstream)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>NÃO suportado (silenciosamente ignorado):</strong> métodos sem
+      <code>[RpcMethod]</code>, métodos com retorno <code>void</code>, <code>int</code>,
+      <code>string</code> ou qualquer tipo não-Task/IAsyncEnumerable/IDuplexCall.
+      Use <code>Task</code> mesmo pra "fire and forget" — RPC é assíncrono por natureza.
+    </div>
+
+    <h2 id="parametros">Como o gerador trata cada parâmetro</h2>
+    <table>
+      <thead>
+        <tr><th>Caso</th><th>Como serializa</th><th>Código gerado (resumido)</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Sem parâmetros (só <code>CancellationToken</code>)</td>
+          <td>Payload fixo <code>"{}"</code></td>
+          <td><code>var __payload = "{}";</code></td>
+        </tr>
+        <tr>
+          <td>1 parâmetro + opcionalmente CT</td>
+          <td>Serializa o tipo diretamente</td>
+          <td><code>var __payload = JsonSerializer.Serialize(arg, RpcJson.Options);</code></td>
+        </tr>
+        <tr>
+          <td>2+ parâmetros (+ opcionalmente CT)</td>
+          <td>Empacota num <code>record</code> internal gerado</td>
+          <td><code>var __payload = JsonSerializer.Serialize(new __IFoo_Bar_Args(a, b, c), RpcJson.Options);</code></td>
+        </tr>
+        <tr>
+          <td><code>CancellationToken</code> em qualquer posição</td>
+          <td>Detectado automaticamente; não vai no payload; passado pro invoker e pro impl</td>
+          <td><code>cancellationToken: ct</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="exclusive">Flag <code>Exclusive</code></h2>
+    <p>
+      <code>[RpcMethod(N, Exclusive = true)]</code> faz o router rejeitar uma 2ª chamada
+      concorrente pra mesmo agente com <code>RpcBusyException</code>, antes mesmo de chegar no
+      agente.
+    </p>
+    <pre><code class="lang-cs">[RpcContract]
+public interface ITefService
+{
+    [RpcMethod(1, Exclusive = true)]   // ← pinpad só processa uma transação por vez
+    IDuplexCall&lt;TefResponse, TefEvent&gt; Charge(TefRequest req, CancellationToken ct);
+}</code></pre>
+    <p>
+      Use em <strong>recursos one-at-a-time</strong>: pinpad TEF, gaveta de dinheiro, leitor
+      biométrico. <strong>Não use</strong> em recursos que aceitam fila (impressora).
+      Mais detalhes em <a class="link-underline" href="concurrency.html">Concorrência</a>.
+    </p>
+
+    <h2 id="inspecionar">Como inspecionar o código gerado</h2>
+    <p>
+      Por padrão os arquivos <code>.g.cs</code> vivem em memória — o compilador os usa mas não
+      persiste em disco. Pra debugá-los, adicione ao <code>csproj</code> que consome o gerador:
+    </p>
+    <pre><code>&lt;PropertyGroup&gt;
+  &lt;EmitCompilerGeneratedFiles&gt;true&lt;/EmitCompilerGeneratedFiles&gt;
+  &lt;CompilerGeneratedFilesOutputPath&gt;$(BaseIntermediateOutputPath)GeneratedFiles&lt;/CompilerGeneratedFilesOutputPath&gt;
+&lt;/PropertyGroup&gt;</code></pre>
+    <p>Depois do próximo <code>dotnet build</code> os arquivos aparecem em:</p>
+    <pre><code>obj/GeneratedFiles/Rpc.SourceGen/Rpc.SourceGen.RpcContractGenerator/
+├── IInventoryService.RpcGenerated.g.cs
+├── ITefService.RpcGenerated.g.cs
+└── ...</code></pre>
+    <p>
+      Útil pra entender exatamente o que o gerador produziu, comparar entre versões, ou debugar
+      por que algum tipo gerado não está sendo encontrado.
+    </p>
+
+    <h2 id="anatomia">Anatomia da saída — exemplo real</h2>
+    <p>
+      Para <code>ITefService.Charge</code> (duplex com 1 arg + CT, <code>Exclusive=true</code>),
+      o gerador emite aproximadamente:
+    </p>
+    <pre><code class="lang-cs">// &lt;auto-generated by Rpc.SourceGen v1.0.0 /&gt;
+namespace Sample.Contracts.Generated;
+
+public sealed class TefServiceProxy : global::Sample.Contracts.ITefService
+{
+    public const string ContractId = "ITefService";
+
+    private readonly global::Rpc.Core.IRpcInvoker __invoker;
+    private readonly global::Rpc.Core.RpcAddress __address;
+
+    public TefServiceProxy(global::Rpc.Core.IRpcInvoker invoker, global::Rpc.Core.RpcAddress address)
+    {
+        this.__invoker = invoker;
+        this.__address = address;
+    }
+
+    public global::Rpc.Contracts.IDuplexCall&lt;TefResponse, TefEvent&gt; Charge(
+        TefRequest initial,
+        global::System.Threading.CancellationToken cancellationToken = default)
+    {
+        var __payload = global::System.Text.Json.JsonSerializer.Serialize(initial, global::Rpc.Core.RpcJson.Options);
+        var __openTask = __invoker.OpenDuplexAsync(__address, ContractId, 1, __payload,
+            exclusive: true,                        // ← veio do [RpcMethod(1, Exclusive = true)]
+            cancellationToken: cancellationToken);
+        return new global::Rpc.Core.DeferredDuplexCall&lt;TefResponse, TefEvent&gt;(__openTask);
+    }
+}
+
+public static class TefServiceDispatcher
+{
+    public const string ContractId = "ITefService";
+
+    public static void Register(global::Rpc.Core.IDispatcherRegistry registry, global::Sample.Contracts.ITefService implementation)
+    {
+        registry.RegisterDuplex(ContractId, 1, async (__initialJson, __upstream, __downstream, __ct) =&gt;
+        {
+            var __arg0 = global::System.Text.Json.JsonSerializer.Deserialize&lt;TefRequest&gt;(__initialJson, global::Rpc.Core.RpcJson.Options)!;
+            await using var __typedCall = implementation.Charge(__arg0, __ct);
+
+            // pump upstream → impl
+            var __pumpUp = global::System.Threading.Tasks.Task.Run(async () =&gt;
+            {
+                try
+                {
+                    await foreach (var __json in __upstream.ReadAllAsync(__ct))
+                    {
+                        var __resp = global::System.Text.Json.JsonSerializer.Deserialize&lt;TefResponse&gt;(__json, global::Rpc.Core.RpcJson.Options);
+                        if (__resp is not null) await __typedCall.SendAsync(__resp, __ct);
+                    }
+                }
+                catch (global::System.OperationCanceledException) { }
+                finally { await __typedCall.CompleteAsync(); }
+            }, __ct);
+
+            // pump impl.Responses → downstream
+            try
+            {
+                await foreach (var __ev in __typedCall.Responses.WithCancellation(__ct))
+                {
+                    var __json = global::System.Text.Json.JsonSerializer.Serialize&lt;TefEvent&gt;(__ev, global::Rpc.Core.RpcJson.Options);
+                    await __downstream.WriteAsync(__json, __ct);
+                }
+            }
+            finally
+            {
+                try { await __pumpUp; } catch { }
+            }
+        });
+    }
+}</code></pre>
+
+    <p>Note que o código gerado:</p>
+    <ul>
+      <li><strong>Usa <code>global::</code></strong> em todos os tipos — não depende de <code>using</code> do consumer.</li>
+      <li><strong>Marca <code>[GeneratedCode]</code></strong> — invisível para code coverage / análise.</li>
+      <li><strong>Reaproveita <code>RpcJson.Options</code></strong> — serializer compartilhado, polymorphism resolvido.</li>
+    </ul>
+
+    <h2 id="versionamento">Versionamento dos contratos</h2>
+    <p>
+      O <strong>MethodId</strong> em <code>[RpcMethod(N)]</code> é a chave de wire. O nome em C#
+      é só pra programador. Regras de evolução:
+    </p>
+    <table>
+      <thead><tr><th>Mudança</th><th>Compatível?</th><th>Como fazer</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Renomear método em C#</td>
+          <td>✅</td>
+          <td>Mantenha o mesmo ID. Clientes antigos seguem chamando pelo wire-id.</td>
+        </tr>
+        <tr>
+          <td>Adicionar novo método</td>
+          <td>✅</td>
+          <td>Use o próximo ID livre.</td>
+        </tr>
+        <tr>
+          <td>Adicionar campo opcional ao DTO</td>
+          <td>✅</td>
+          <td><code>System.Text.Json</code> ignora membros faltantes por padrão.</td>
+        </tr>
+        <tr>
+          <td>Alterar tipo de parâmetro ou retorno</td>
+          <td>❌ quebra wire</td>
+          <td>Crie <code>[RpcMethod(N+1)]</code> novo com o tipo novo. Marque o antigo <code>[Obsolete]</code>.</td>
+        </tr>
+        <tr>
+          <td>Remover método</td>
+          <td>❌ pra clientes antigos</td>
+          <td>Queime o ID — nunca reutilize. Mantenha o método <code>[Obsolete]</code> por uma versão.</td>
+        </tr>
+        <tr>
+          <td>Renomear DTO em C#</td>
+          <td>✅</td>
+          <td>JSON serializa por nome de propriedade, não de tipo.</td>
+        </tr>
+        <tr>
+          <td>Renomear propriedade do DTO</td>
+          <td>❌</td>
+          <td>Wire é JSON com nome de campo — quebra. Use <code>[JsonPropertyName]</code> pra manter wire estável.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="erros-comuns">Erros comuns e debugging</h2>
+
+    <h3 id="erro-1">"O nome 'FooProxy' não existe no contexto atual"</h3>
+    <p>Causa típica: você esqueceu de adicionar <code>using YourNs.Generated;</code>. O gerador
+    coloca os tipos no sub-namespace <code>.Generated</code>, não na mesma namespace do contrato.</p>
+
+    <h3 id="erro-2">Nada é gerado mesmo com <code>[RpcContract]</code> na interface</h3>
+    <p>Verifique:</p>
+    <ul>
+      <li>O projeto referencia o gerador como <code>OutputItemType="Analyzer"</code>?</li>
+      <li>Pelo menos um método tem <code>[RpcMethod(N)]</code>? Interfaces sem nenhum método marcado são ignoradas.</li>
+      <li>O atributo é <code>Rpc.Contracts.RpcContractAttribute</code> e não outro com mesmo nome curto?</li>
+    </ul>
+    <p>
+      Pra inspeção rápida: ative <code>EmitCompilerGeneratedFiles</code> e veja se o arquivo
+      <code>.g.cs</code> aparece. Se não aparecer, o gerador não enxergou a interface.
+    </p>
+
+    <h3 id="erro-3">Um método específico não foi gerado</h3>
+    <p>O gerador silenciosamente pula métodos com:</p>
+    <ul>
+      <li>Retorno fora dos 4 padrões suportados (ex: <code>void</code>, <code>int</code>, <code>IObservable&lt;T&gt;</code>).</li>
+      <li>Sem o atributo <code>[RpcMethod(N)]</code>.</li>
+      <li>Genéricos no método (<code>Task&lt;T&gt; Foo&lt;T&gt;()</code>).</li>
+    </ul>
+
+    <h3 id="erro-4">"Id é não um argumento de atributo nomeado válido"</h3>
+    <p>
+      <code>[RpcMethod(Id = 1)]</code> <strong>não compila</strong> porque <code>Id</code> é
+      parâmetro do construtor. Use positional: <code>[RpcMethod(1)]</code> ou
+      <code>[RpcMethod(1, Exclusive = true)]</code>.
+    </p>
+
+    <h3 id="erro-5">Dois contratos com mesmo nome curto colidem no <code>ContractId</code></h3>
+    <p>
+      O <code>ContractId</code> é o nome curto da interface (<code>"IOrderService"</code>). Se
+      você tem <code>MyApp.Sales.IOrderService</code> e <code>MyApp.Kitchen.IOrderService</code>
+      no mesmo Hub, vão colidir. Rename um deles ou use namespace prefix manual no contractId
+      (não suportado nativamente — vira fork do gerador).
+    </p>
+
+    <h2 id="limitacoes">Limitações conhecidas</h2>
+    <ul>
+      <li><strong>Sem suporte a <code>out</code>/<code>ref</code> params</strong> — incompatível com RPC.</li>
+      <li><strong>Sem generic methods</strong> — <code>Task&lt;T&gt; Foo&lt;T&gt;()</code> não funciona. Use generic interfaces ou método não-genérico com discriminador.</li>
+      <li><strong>Sem default interface methods</strong> — só métodos declarados são gerados.</li>
+      <li><strong>JSON serializer é fixo</strong> em <code>RpcJson.Options</code>. Pra trocar, você precisaria forkar o gerador. Plano: tornar configurável via attribute futuramente.</li>
+      <li><strong>Args record para 2+ params</strong> gera um <code>record</code> internal extra. Adiciona ~1KB ao IL gerado por método.</li>
+      <li><strong>Tipos referenciados</strong> precisam estar acessíveis — não pode haver tipo <code>internal</code> do parâmetro num assembly e a interface em outro.</li>
+    </ul>
+
+    <h2 id="como-funciona">Como o gerador funciona por dentro</h2>
+    <p>
+      <code>IIncrementalGenerator</code> (Roslyn API moderna, mais rápida que <code>ISourceGenerator</code>).
+      Pipeline:
+    </p>
+    <ol>
+      <li>
+        <code>ForAttributeWithMetadataName("Rpc.Contracts.RpcContractAttribute")</code> filtra
+        apenas <code>InterfaceDeclarationSyntax</code> com o atributo — barato e cached.
+      </li>
+      <li>
+        <code>ContractModel.Build(ctx, ct)</code> usa o <code>SemanticModel</code> pra extrair:
+        nome da interface, namespace, métodos com <code>[RpcMethod]</code>, classificação do
+        retorno (<code>INamedTypeSymbol.ConstructedFrom</code> comparado com
+        <code>Task&lt;T&gt;</code>, <code>IAsyncEnumerable&lt;T&gt;</code>,
+        <code>IDuplexCall&lt;TUp, TDown&gt;</code>), parâmetros com seus tipos qualificados.
+      </li>
+      <li>
+        <code>ContractEmitter.Emit(model)</code> constrói o C# como string com
+        <code>StringBuilder</code> — sem AST manipulation, sem syntax tree rewriting. Mais
+        simples e mais previsível.
+      </li>
+      <li>
+        <code>RegisterSourceOutput</code> adiciona o resultado como arquivo gerado com hint name
+        <code>{InterfaceShortName}.RpcGenerated.g.cs</code>.
+      </li>
+    </ol>
+
+    <h2 id="faq">FAQ</h2>
+
+    <h3>Posso ter contratos num assembly e implementações em outro?</h3>
+    <p>
+      Sim — esse é o pattern normal. O gerador roda no assembly que <strong>contém a
+      interface marcada</strong>. Os tipos gerados ficam nesse assembly. O assembly que
+      implementa a interface não precisa ter o gerador, só uma referência ao assembly de
+      contratos.
+    </p>
+
+    <h3>O gerador funciona em CI / build server?</h3>
+    <p>
+      Sim. Roslyn analyzers funcionam em qualquer ambiente .NET SDK ≥ 7. O
+      <code>setup-dotnet@v4</code> do GitHub Actions já vem com tudo necessário. O CI dos
+      4 repos do RpcKit/TefKit/PrintKit roda exatamente assim.
+    </p>
+
+    <h3>Posso compartilhar contratos entre client e server?</h3>
+    <p>
+      Esse é o objetivo. Um único assembly de contratos é referenciado pelo client (que pega o
+      proxy gerado) e pelo server/agente (que pega o dispatcher gerado). Ambos têm o gerador
+      rodando — emite os dois tipos no mesmo arquivo.
+    </p>
+
+    <h3>Posso desabilitar pra um projeto específico?</h3>
+    <p>
+      Sim. Remova a <code>ProjectReference</code> com <code>OutputItemType="Analyzer"</code> ou
+      o package <code>RpcKit.SourceGen</code>. As classes geradas somem do build seguinte.
+    </p>
+
+    <h3>O gerador altera meu código-fonte?</h3>
+    <p>
+      Nunca. Roslyn generators são <strong>aditivos</strong> — só emitem novos arquivos. Seu
+      código existente nunca é tocado.
+    </p>
+
+    <h3>Quanto custa em tempo de build?</h3>
+    <p>
+      Negligível. Em projetos com 4 contratos, &lt;50ms a mais de build. Incremental — só
+      reroda quando o syntax tree dos arquivos com <code>[RpcContract]</code> muda.
+    </p>
+
+    <h3>Posso ver o que ele gerou antes de compilar?</h3>
+    <p>
+      Não — o gerador roda <strong>durante</strong> a compilação. Mas pode ver depois ativando
+      <code>EmitCompilerGeneratedFiles</code> (seção acima). Outra opção: use o
+      <strong>Roslyn Syntax Visualizer</strong> no Visual Studio pra inspecionar o syntax tree
+      gerado.
+    </p>
+
+    <h2 id="proximos">Próximos passos</h2>
+    <ul>
+      <li><a class="link-underline" href="contracts.html">Novos contratos</a> — fluxo completo de adicionar um contrato.</li>
+      <li><a class="link-underline" href="duplex.html">Duplex e CliSiTef</a> — entender o tipo de retorno duplex.</li>
+      <li><a class="link-underline" href="concurrency.html">Concorrência</a> — quando usar <code>Exclusive=true</code>.</li>
+      <li><a class="link-underline" href="testing.html">Testes</a> — como testar contratos gerados.</li>
+    </ul>
+
+    <footer class="page-foot">
+      <a href="contracts.html">← Novos contratos</a>
+      <a href="testing.html">Testes →</a>
+    </footer>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

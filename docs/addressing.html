@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Endereçamento — RpcKit</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand">Rpc<span class="accent">Kit</span></div>
+    <div class="brand-tagline">SignalR + typed RPC + duplex CliSiTef</div>
+    <nav class="toc">
+      <h4>Começo</h4>
+      <ul>
+        <li><a href="index.html">Visão geral</a></li>
+        <li><a href="quickstart.html">Quickstart</a></li>
+        <li><a href="architecture.html">Arquitetura</a></li>
+      </ul>
+      <h4>Conceitos</h4>
+      <ul>
+        <li><a href="addressing.html">Endereçamento</a></li>
+        <li><a href="duplex.html">Duplex e CliSiTef</a></li>
+        <li><a href="concurrency.html">Concorrência</a></li>
+        <li><a href="contracts.html">Novos contratos</a></li>
+        <li><a href="sourcegen.html">Source Generator</a></li>
+      </ul>
+      <h4>Operação</h4>
+      <ul>
+        <li><a href="testing.html">Testes</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main>
+    <span class="eyebrow">Conceitos</span>
+    <h1>Endereçamento</h1>
+    <p class="lede">
+      O endereço diz <em>quem</em> deve responder a uma chamada. RpcKit oferece quatro variantes
+      cobrindo os modos de roteamento típicos de sistemas multi-dispositivo.
+    </p>
+
+    <h2 id="variantes">As quatro variantes de <code>RpcAddress</code></h2>
+
+    <table>
+      <thead><tr><th>Variante</th><th>Construtor</th><th>Quando usar</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="tag">SERVER</span></td>
+          <td><code>RpcAddress.Server</code></td>
+          <td>Handler local no servidor. Sem hop pela rede em modo in-process (<code>InProcessRpcInvoker</code>).</td>
+        </tr>
+        <tr>
+          <td><span class="tag">DEVICE</span></td>
+          <td><code>RpcAddress.Device(deviceId)</code></td>
+          <td>Direto a um device específico já conectado (ex: PDV-02 pinga o PDV-01).</td>
+        </tr>
+        <tr>
+          <td><span class="tag">ROLE</span></td>
+          <td><code>RpcAddress.Role(capability, tenantId)</code></td>
+          <td>Primeiro device do tenant que declarou a capability (ex: qualquer impressora da cozinha).</td>
+        </tr>
+        <tr>
+          <td><span class="tag">USER</span></td>
+          <td><code>RpcAddress.User(userId, capability)</code></td>
+          <td>O device do usuário logado que tem a capability (ex: o pinpad TEF do operador X).</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2 id="server">Server</h2>
+    <p>O alvo é um handler registrado no servidor via <code>DispatcherRegistry.RegisterInvoke(...)</code>.</p>
+    <pre><code class="lang-cs">var orders = await Rpc.For&lt;IOrderService&gt;(RpcAddress.Server)
+                      .GetOpenOrdersAsync(ct);</code></pre>
+    <p>No <code>Sample.Server.Api</code>, o <code>DispatcherStartup</code> registra o handler de <code>IOrderService</code> na inicialização.</p>
+
+    <h2 id="device">Device</h2>
+    <p>O caller sabe o <code>DeviceId</code> exato do alvo. O <code>DeviceRegistry</code> resolve para o <code>ConnectionId</code> ativo daquele device.</p>
+    <pre><code class="lang-cs">var pong = await Rpc.For&lt;IPosTerminal&gt;(RpcAddress.Device("PDV-02"))
+                    .PingAsync(ct);</code></pre>
+    <div class="callout warn">
+      <strong>Atenção:</strong> se o device estiver offline, a chamada lança <code>RpcException</code>
+      com <code>Kind = "RouteNotFound"</code>. Isso é coberto pelo teste
+      <code>Invoke_to_offline_device_throws_RouteNotFound</code>.
+    </div>
+
+    <h2 id="role">Role</h2>
+    <p>O caller sabe a <em>capability</em> que precisa, e o tenant. O router pega o primeiro device disponível com aquela capability dentro do tenant.</p>
+    <pre><code class="lang-cs">await Rpc.For&lt;IPrinterService&gt;(
+        RpcAddress.Role(Capability.PrinterKitchen, tenantId))
+    .PrintAsync(new PrintJob("Pedido 1", "1x Pizza"), ct);</code></pre>
+    <p>
+      <strong>Capabilities pré-definidas</strong> (em <code>Capability</code>):
+      <code>Tef</code>, <code>PrinterKitchen</code>, <code>PrinterPdv</code>,
+      <code>PosTerminal</code>. Defina as suas próprias com <code>new Capability("seu.nome")</code>.
+    </p>
+
+    <h2 id="user">User</h2>
+    <p>O caso TEF. O caller (Blazor) sabe quem é o operador logado; o router precisa achar
+    <em>o device daquele operador</em> com a capability TEF. Roteamento de granularidade fina.</p>
+    <pre><code class="lang-cs">var tef = Rpc.For&lt;ITefService&gt;(
+    RpcAddress.User(currentUserId, Capability.Tef));</code></pre>
+
+    <div class="callout">
+      <strong>Multi-tenant no futuro:</strong> os quatro construtores já carregam
+      (ou serão capazes de carregar) <code>tenantId</code>. Quando o sistema virar SaaS multi-tenant,
+      basta o <code>DeviceRegistry</code> particionar por tenant e o Hub validar
+      <code>tenant_id</code> nos claims do JWT. Os contratos e as chamadas
+      <strong>não mudam</strong>.
+    </div>
+
+    <h2 id="handshake">Handshake do agente — <code>IRpcIdentityProvider</code></h2>
+    <p>
+      O agente declara seu endereçamento ao conectar — via query string da URL do Hub. A
+      <strong>identidade</strong> (DeviceId + UserId + TenantId + Capabilities) é fornecida por
+      uma implementação de <code>IRpcIdentityProvider</code> registrada no DI. Uma única interface,
+      um único método, leitura atômica.
+    </p>
+
+    <h3 id="identity-static">Caso 1 — Identidade fixa (worker service, kiosk, dev)</h3>
+    <p>
+      Pro caso comum onde a identidade do agente não muda durante o processo (service account,
+      kiosk com login feito antes), use o atalho <code>UseStaticIdentity</code>:
+    </p>
+    <pre><code class="lang-cs">services.AddRpcClient(o =&gt;
+{
+    o.HubUrl = "https://api.foo.com/rpc";
+    o.AccessTokenProvider = () =&gt; GetJwtAsync();   // JWT continua sendo Func — vai direto pro SignalR
+})
+.UseStaticIdentity(new RpcIdentity(
+    DeviceId: "PDV-01",
+    UserId: "operator-1",
+    TenantId: "tenant-x",
+    Capabilities: [Capability.Tef, Capability.PrinterPdv]));</code></pre>
+
+    <p>Resulta numa URL como:</p>
+    <pre><code>https://api.foo.com/rpc?deviceId=PDV-01&amp;tenantId=tenant-x&amp;userId=operator-1&amp;caps=tef,printer.pdv</code></pre>
+    <p>O <code>RpcHub.OnConnectedAsync</code> parseia esses valores e registra a entrada no <code>DeviceRegistry</code>.</p>
+
+    <div class="callout warn">
+      <strong>Em produção:</strong> os valores acima devem vir dos <em>claims do JWT</em>, não
+      da query string. O fluxo de handshake fica o mesmo, mas o servidor lê <code>Context.User</code>
+      em vez de <code>Context.GetHttpContext().Request.Query</code>. Este é um TODO simples
+      quando você integrar autenticação ASP.NET.
+    </div>
+
+    <h3 id="identity-dynamic">Caso 2 — Identidade dinâmica (login após startup)</h3>
+    <p>
+      Em apps com tela de login, o <code>UserId</code> só é conhecido <em>depois</em> do operador
+      logar e pode trocar durante a sessão. Implemente <code>IRpcIdentityProvider</code> com sua
+      lógica e registre via <code>UseIdentityProvider&lt;T&gt;</code>:
+    </p>
+    <pre><code class="lang-cs">public sealed class AppIdentityProvider(
+    ISessionStore session,
+    IMachineFingerprint fingerprint,
+    IHardwareScan hardware) : IRpcIdentityProvider
+{
+    public async Task&lt;RpcIdentity&gt; GetIdentityAsync(CancellationToken ct)
+    {
+        var current = await session.GetCurrentAsync(ct);
+        var caps = new List&lt;Capability&gt;();
+        if (await hardware.HasPinpadAsync(ct))  caps.Add(Capability.Tef);
+        if (await hardware.HasPrinterAsync(ct)) caps.Add(Capability.PrinterPdv);
+
+        return new RpcIdentity(
+            DeviceId: await fingerprint.GetAsync(ct),
+            UserId: current?.UserId,
+            TenantId: current?.TenantId,
+            Capabilities: caps);
+    }
+}
+
+// no DI setup:
+services.AddSingleton&lt;ISessionStore, SessionStore&gt;();
+services.AddSingleton&lt;IMachineFingerprint, MachineFingerprint&gt;();
+services.AddSingleton&lt;IHardwareScan, HardwareScan&gt;();
+
+services.AddRpcClient(o =&gt;
+{
+    o.HubUrl = "https://api.foo.com/rpc";
+    o.AccessTokenProvider = sp =&gt; sp.GetRequiredService&lt;ISessionStore&gt;().GetJwtAsync();
+})
+.UseIdentityProvider&lt;AppIdentityProvider&gt;();</code></pre>
+    <p>
+      Vantagens da interface sobre callbacks separados: <strong>leitura atômica</strong> da sessão
+      (só um round-trip), <strong>injeção de dependências</strong> natural no construtor,
+      <strong>testabilidade</strong> simples via mock da interface, e <strong>contrato claro</strong>
+      (1 método, 1 retorno).
+    </p>
+
+    <h3 id="reconnect">Reconectar após login/logout</h3>
+    <p>
+      O <code>IRpcIdentityProvider.GetIdentityAsync</code> é chamado UMA vez por ciclo de conexão.
+      Pra trocar identidade quando o usuário loga/desloga, dispare <code>ReconnectAsync()</code> —
+      ele descarta a conexão atual e abre uma nova, re-invocando o provider:
+    </p>
+    <pre><code class="lang-cs">public sealed class LoginPage(RpcConnectionHost rpc, ISessionStore session)
+{
+    public async Task OnLoginAsync(string username, string password)
+    {
+        var result = await Authenticate(username, password);
+        await session.SetCurrentAsync(result);
+        await rpc.ReconnectAsync();   // ← agora o agente reconecta como o usuário X
+    }
+
+    public async Task OnLogoutAsync()
+    {
+        await session.ClearAsync();
+        await rpc.ReconnectAsync();   // ← reconecta sem UserId (modo device-only)
+    }
+}</code></pre>
+
+    <div class="callout">
+      <strong>Por que não <code>Func&lt;Task&lt;string?&gt;&gt;</code> separados pra cada campo?</strong>
+      Identidade é estado coeso — você lê tudo da mesma sessão, no mesmo instante. 4 callbacks
+      forçariam 4 round-trips ao session store. Uma interface com um método garante atomicidade.
+      <br/>O <code>AccessTokenProvider</code> permanece como <code>Func&lt;Task&lt;string?&gt;&gt;</code>
+      porque é repassado diretamente ao SignalR sem nossa intermediação — manter consistência com a API dele.
+    </div>
+
+    <h2 id="blazor-server">Blazor Server não usa <code>AddRpcClient</code></h2>
+    <p>
+      Vale repetir: o <strong>Blazor Server</strong> hospeda o Hub via <code>AddRpcServer()</code>.
+      Ele não conecta a si mesmo. O usuário corrente nas chamadas vem do
+      <code>AuthenticationStateProvider</code> da request — não do handshake.
+    </p>
+    <pre><code class="lang-cs">// no Demo.Web/Program.cs:
+builder.Services.AddScoped&lt;ICurrentTefUser&gt;(sp =&gt;
+{
+    var auth = sp.GetRequiredService&lt;AuthenticationStateProvider&gt;();
+    var state = auth.GetAuthenticationStateAsync().Result;
+    var userId = state.User.FindFirst("sub")?.Value ?? "anonymous";
+    return new DemoTefUser(userId);
+});
+
+builder.Services.AddScoped&lt;ITefAddressResolver, CurrentUserTefAddressResolver&gt;();
+// CurrentUserTefAddressResolver.Resolve = RpcAddress.User(currentUser.UserId, Capability.Tef)</code></pre>
+    <p>
+      Cada request HTTP cria seu próprio escopo. O <code>ICurrentTefUser</code> resolve o
+      usuário do request corrente, e o <code>ITefAddressResolver</code> monta o
+      <code>RpcAddress.User(...)</code> certo na hora da chamada. Zero envolvimento de startup.
+    </p>
+
+    <h2 id="resolucao">O que o router resolve em cada caso</h2>
+    <table>
+      <thead><tr><th>Endereço</th><th>O router faz</th></tr></thead>
+      <tbody>
+        <tr><td><code>ServerAddress</code></td><td>Acha o dispatcher local em <code>DispatcherRegistry</code> e roda.</td></tr>
+        <tr><td><code>DeviceAddress</code></td><td><code>DeviceRegistry.ResolveByDeviceId(...)</code></td></tr>
+        <tr><td><code>RoleAddress</code></td><td><code>DeviceRegistry.ResolveByCapability(cap, tenantId)</code> — primeiro match.</td></tr>
+        <tr><td><code>UserAddress</code></td><td><code>DeviceRegistry.ResolveByUserCapability(userId, cap)</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2 id="proximos">Próximos passos</h2>
+    <ul>
+      <li><a class="link-underline" href="duplex.html">Duplex e CliSiTef</a> — como modelar interações de várias rodadas.</li>
+      <li><a class="link-underline" href="contracts.html">Novos contratos</a> — adicionar seu próprio <code>IService</code>.</li>
+    </ul>
+
+    <footer class="page-foot">
+      <a href="architecture.html">← Arquitetura</a>
+      <a href="duplex.html">Duplex e CliSiTef →</a>
+    </footer>
+  </main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
