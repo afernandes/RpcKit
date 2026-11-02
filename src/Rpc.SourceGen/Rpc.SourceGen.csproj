@@ -7,6 +7,8 @@
     <IsRoslynComponent>true</IsRoslynComponent>
     <EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
     <IncludeBuildOutput>false</IncludeBuildOutput>
+    <!-- Analyzer DLLs are packed below, outside lib/; there is no symbol-package payload. -->
+    <IncludeSymbols>false</IncludeSymbols>
     <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
   </PropertyGroup>

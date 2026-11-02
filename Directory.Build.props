@@ -40,8 +40,7 @@
     <!-- MinVer deriva a versão do NuGet a partir das tags git (vX.Y.Z). -->
     <PackageReference Include="MinVer" Version="6.0.0" PrivateAssets="all" Condition="'$(IsPackable)' == 'true' OR '$(MSBuildProjectName.EndsWith(`Tests`))' == 'true'" />
 
-    <!-- SourceLink — debug "step into" funciona via NuGet.org. -->
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="all" Condition="'$(IsPackable)' == 'true'" />
+    <!-- Source Link is supplied by the patched .NET SDK pinned in global.json. -->
   </ItemGroup>
 
   <!-- MinVer configuration -->
