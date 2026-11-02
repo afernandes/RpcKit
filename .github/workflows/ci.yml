@@ -33,6 +33,9 @@ jobs:
       - name: Test
         run: dotnet test Rpc.slnx -c Release --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx" --logger "GitHubActions"
 
+      - name: Validate NuGet packages
+        run: dotnet pack Rpc.slnx -c Release --no-build --output artifacts
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
